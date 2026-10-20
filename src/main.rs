@@ -1,4 +1,6 @@
 mod editor;
+#[cfg(target_os = "windows")]
+mod preview;
 
 use gpui::AppContext;
 

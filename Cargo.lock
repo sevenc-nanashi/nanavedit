@@ -3441,9 +3441,15 @@ dependencies = [
 name = "nanavedit"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-channel",
  "gpui-box",
  "gpui-box-kit",
  "gpui-box-platform",
+ "image",
+ "raw-window-handle",
+ "wgpu",
+ "windows 0.61.3",
 ]
 
 [[package]]
