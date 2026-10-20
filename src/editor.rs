@@ -1,9 +1,11 @@
+use crate::timeline::Timeline;
 use gpui::{
     Context, CursorStyle, Div, FocusHandle, IntoElement, MouseButton, Point, Render, Window, div,
     prelude::*, px,
 };
-#[cfg(target_os = "windows")]
 use gpui_kit::prelude::{Button, ControlSize, Disableable, Sizable};
+use std::{cell::Cell, rc::Rc};
+mod timeline_ui;
 use gpui_kit::{
     semantics::{NodeSpec, Role, Semantic, SemanticCoordinator},
     theme::Theme,
@@ -33,14 +35,18 @@ pub struct Editor {
     settings_focus: FocusHandle,
     timeline_focus: FocusHandle,
     drag: Option<(Panel, Point<gpui::Pixels>)>,
+    timeline: Timeline,
+    edit_focus: FocusHandle,
+    timeline_buttons: [FocusHandle; 7],
+    timeline_scroll: gpui::ScrollHandle,
+    timeline_bounds: Rc<Cell<gpui::Bounds<gpui::Pixels>>>,
+    clip_drag: Option<timeline_ui::Drag>,
+    bad_drop: bool,
     #[cfg(target_os = "windows")]
     preview: Option<crate::preview::Preview>,
     #[cfg(target_os = "windows")]
     open_focus: FocusHandle,
-    #[cfg(target_os = "windows")]
     loading: bool,
-    #[cfg(target_os = "windows")]
-    has_image: bool,
     preview_error: Option<String>,
     #[cfg(target_os = "windows")]
     gpu_failed: bool,
@@ -50,6 +56,18 @@ impl Editor {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
+        let edit_focus = cx.focus_handle().tab_stop(true).tab_index(3);
+        cx.on_blur(&edit_focus, window, |editor, _, cx| {
+            editor.finish_clip_drag(true, cx);
+        })
+        .detach();
+        cx.observe_window_activation(window, |editor, window, cx| {
+            if !window.is_window_active() {
+                editor.finish_clip_drag(true, cx);
+                editor.drag = None;
+            }
+        })
+        .detach();
         #[cfg(target_os = "windows")]
         let (preview, preview_error) = {
             let (sender, receiver) = async_channel::bounded(1);
@@ -59,6 +77,7 @@ impl Editor {
                         .update(cx, |editor, cx| {
                             editor.preview_error = Some(error);
                             editor.gpu_failed = true;
+                            editor.timeline.playing = None;
                             cx.notify();
                         })
                         .is_err()
@@ -84,14 +103,22 @@ impl Editor {
             settings_focus: cx.focus_handle().tab_stop(true).tab_index(1),
             timeline_focus: cx.focus_handle().tab_stop(true).tab_index(2),
             drag: None,
+            timeline: Timeline::default(),
+            edit_focus,
+            timeline_buttons: std::array::from_fn(|index| {
+                cx.focus_handle()
+                    .tab_stop(true)
+                    .tab_index(4 + index as isize)
+            }),
+            timeline_scroll: gpui::ScrollHandle::new(),
+            timeline_bounds: Rc::new(Cell::new(gpui::Bounds::default())),
+            clip_drag: None,
+            bad_drop: false,
             #[cfg(target_os = "windows")]
             preview,
             #[cfg(target_os = "windows")]
             open_focus: cx.focus_handle().tab_stop(true).tab_index(0),
-            #[cfg(target_os = "windows")]
             loading: false,
-            #[cfg(target_os = "windows")]
-            has_image: false,
             preview_error,
             #[cfg(target_os = "windows")]
             gpu_failed,
@@ -103,6 +130,8 @@ impl Editor {
         if self.loading || self.gpu_failed {
             return;
         }
+        self.finish_clip_drag(false, cx);
+        self.timeline.playing = None;
         let limit = self
             .preview
             .as_ref()
@@ -118,7 +147,7 @@ impl Editor {
         cx.notify();
         let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
-            let result: anyhow::Result<Option<image::RgbaImage>> = async {
+            let result: anyhow::Result<Option<(std::path::PathBuf, image::RgbaImage)>> = async {
                 let Some(paths) = paths.await?? else {
                     return Ok(None);
                 };
@@ -127,7 +156,9 @@ impl Editor {
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("画像が選択されていません"))?;
                 executor
-                    .spawn(async move { crate::preview::load_image(&path, limit).map(Some) })
+                    .spawn(async move {
+                        crate::preview::load_image(&path, limit).map(|image| Some((path, image)))
+                    })
                     .await
             }
             .await;
@@ -136,15 +167,27 @@ impl Editor {
                 // A delayed decode must not overwrite a device-loss notification.
                 if !editor.gpu_failed {
                     match result {
-                        Ok(Some(image)) => {
+                        Ok(Some((path, image))) => {
+                            let id = editor.timeline.allocate_id();
+                            let asset = crate::timeline::ImageAsset {
+                                id,
+                                name: path
+                                    .file_name()
+                                    .expect("selected file has a name")
+                                    .to_string_lossy()
+                                    .into_owned(),
+                                width: image.width(),
+                                height: image.height(),
+                            };
                             match editor
                                 .preview
                                 .as_ref()
                                 .expect("available preview owns a renderer")
-                                .set_image(image)
+                                .register_image(id, image)
                             {
                                 Ok(()) => {
-                                    editor.has_image = true;
+                                    editor.timeline.add_image(asset);
+                                    editor.sync_timeline();
                                     editor.preview_error = None;
                                 }
                                 Err(error) => {
@@ -185,7 +228,7 @@ impl Editor {
                     .label(if self.loading {
                         "読み込み中…"
                     } else {
-                        "画像を開く"
+                        "画像を追加"
                     })
                     .on_click(move |window, cx| {
                         let _ = entity.update(cx, |editor, cx| {
@@ -213,23 +256,19 @@ impl Editor {
             .text_center()
             .text_color(theme.colors.text_muted);
         #[cfg(target_os = "windows")]
-        let frame = if self.has_image && !self.gpu_failed {
+        let frame = if !self.gpu_failed {
             frame.child(
                 gpui::platform_view(
                     self.preview
                         .as_ref()
-                        .expect("loaded image owns a renderer")
+                        .expect("available preview owns a renderer")
                         .handle
                         .clone(),
                 )
                 .size_full(),
             )
         } else {
-            frame.child(if self.gpu_failed {
-                "プレビューを利用できません"
-            } else {
-                "画像を開いてください"
-            })
+            frame.child("プレビューを利用できません")
         };
         #[cfg(not(target_os = "windows"))]
         let frame = frame.child("このOSではプレビュー未対応です");
@@ -398,6 +437,11 @@ fn empty_message(message: &'static str, theme: &Theme) -> Div {
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         SemanticCoordinator::global(cx).begin_frame(window);
+        self.timeline.tick();
+        self.sync_preview();
+        if self.timeline.playing.is_some() {
+            window.request_animation_frame();
+        }
         self.constrain(window);
         let theme = Theme::get(cx).clone();
         let viewport = window.viewport_size();
@@ -437,6 +481,7 @@ impl Render for Editor {
             })
             .on_mouse_move(
                 cx.listener(|editor, event: &gpui::MouseMoveEvent, window, cx| {
+                    editor.move_clip_drag(event, cx);
                     if let Some((panel, previous)) = editor.drag {
                         if event.pressed_button != Some(MouseButton::Left) {
                             editor.drag = None;
@@ -453,11 +498,17 @@ impl Render for Editor {
             )
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|editor, _, _, _| editor.drag = None),
+                cx.listener(|editor, _, _, cx| {
+                    editor.drag = None;
+                    editor.finish_clip_drag(false, cx);
+                }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|editor, _, _, _| editor.drag = None),
+                cx.listener(|editor, _, _, cx| {
+                    editor.drag = None;
+                    editor.finish_clip_drag(false, cx);
+                }),
             )
             .child(
                 div()
@@ -473,10 +524,11 @@ impl Render for Editor {
                     )
                     .child(self.divider(Panel::Settings, cx))
                     .child(
-                        div().w(px(self.settings_width)).h_full().flex_none().child(
-                            panel("設定", &theme)
-                                .child(empty_message("オブジェクトが選択されていません", &theme)),
-                        ),
+                        div()
+                            .w(px(self.settings_width))
+                            .h_full()
+                            .flex_none()
+                            .child(panel("設定", &theme).child(self.selection_details(&theme))),
                     ),
             )
             .child(self.divider(Panel::Timeline, cx))
@@ -486,8 +538,7 @@ impl Render for Editor {
                     .h(px(self.timeline_height))
                     .flex_none()
                     .child(
-                        panel("タイムライン", &theme)
-                            .child(empty_message("オブジェクトがありません", &theme)),
+                        panel(self.timeline_toolbar(cx), &theme).child(self.timeline_content(cx)),
                     ),
             )
     }

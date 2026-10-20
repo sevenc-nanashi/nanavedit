@@ -1,6 +1,7 @@
 mod editor;
 #[cfg(target_os = "windows")]
 mod preview;
+mod timeline;
 
 use gpui::AppContext;
 

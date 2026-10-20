@@ -1,5 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
+    collections::{HashMap, HashSet},
     num::NonZeroIsize,
     path::Path,
     rc::Rc,
@@ -136,7 +137,7 @@ impl Preview {
             .max_texture_dimension_2d
     }
 
-    pub fn set_image(&self, image: RgbaImage) -> Result<()> {
+    pub fn register_image(&self, id: u64, image: RgbaImage) -> Result<()> {
         ensure!(
             !self.native.failed.load(Ordering::Relaxed),
             "GPU描画を続行できません。アプリを再起動してください"
@@ -146,9 +147,25 @@ impl Preview {
             .borrow_mut()
             .as_mut()
             .context("描画ウィンドウが閉じられています")?
-            .set_image(image)?;
-        self.native.invalidate();
+            .register_image(id, image)?;
         Ok(())
+    }
+
+    pub fn set_images(&self, images: Vec<u64>) {
+        let mut gpu = self.native.gpu.borrow_mut();
+        if let Some(gpu) = gpu.as_mut()
+            && gpu.visible != images
+        {
+            gpu.visible = images;
+            self.native.invalidate();
+        }
+    }
+
+    pub fn retain_images(&self, retained: &HashSet<u64>) {
+        // shortcut: history keeps images resident; add an eviction budget for large projects.
+        if let Some(gpu) = self.native.gpu.borrow_mut().as_mut() {
+            gpu.images.retain(|id, _| retained.contains(id));
+        }
     }
 }
 
@@ -297,7 +314,8 @@ struct Gpu {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
-    image: Option<(wgpu::BindGroup, u32, u32)>,
+    images: HashMap<u64, (wgpu::BindGroup, u32, u32)>,
+    visible: Vec<u64>,
 }
 
 impl Gpu {
@@ -379,7 +397,7 @@ impl Gpu {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: None,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -398,11 +416,12 @@ impl Gpu {
             queue,
             config,
             pipeline,
-            image: None,
+            images: HashMap::new(),
+            visible: Vec::new(),
         })
     }
 
-    fn set_image(&mut self, image: RgbaImage) -> Result<()> {
+    fn register_image(&mut self, id: u64, image: RgbaImage) -> Result<()> {
         let (width, height) = image.dimensions();
         let limit = self.device.limits().max_texture_dimension_2d;
         ensure!(
@@ -454,7 +473,7 @@ impl Gpu {
                 },
             ],
         });
-        self.image = Some((bind_group, width, height));
+        self.images.insert(id, (bind_group, width, height));
         Ok(())
     }
 
@@ -504,7 +523,9 @@ impl Gpu {
                 })],
                 ..Default::default()
             });
-            if let Some((image, image_width, image_height)) = &self.image {
+            for id in &self.visible {
+                let (image, image_width, image_height) =
+                    self.images.get(id).expect("visible image is registered");
                 let scale =
                     (width as f32 / *image_width as f32).min(height as f32 / *image_height as f32);
                 let w = *image_width as f32 * scale;

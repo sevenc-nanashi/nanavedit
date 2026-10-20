@@ -15,5 +15,5 @@ fn vs_main(@builtin(vertex_index) index: u32) -> Vertex {
 @fragment
 fn fs_main(vertex: Vertex) -> @location(0) vec4<f32> {
     let color = textureSample(picture, picture_sampler, vertex.uv);
-    return vec4(color.rgb * color.a, 1.0);
+    return vec4(color.rgb * color.a, color.a);
 }
