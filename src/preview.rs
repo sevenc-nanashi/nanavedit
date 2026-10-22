@@ -409,7 +409,7 @@ impl Gpu {
             label: Some("effect params"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -422,7 +422,10 @@ impl Gpu {
             &device,
             [&image_layout, &params_layout],
             "composite / present",
-            include_str!("preview.wgsl"),
+            (
+                include_str!("preview/vertex.wgsl"),
+                include_str!("preview.wgsl"),
+            ),
             format,
             Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
         )?;
@@ -430,7 +433,18 @@ impl Gpu {
             &device,
             [&image_layout, &params_layout],
             "composite",
-            include_str!("preview.wgsl"),
+            (
+                include_str!("preview/vertex.wgsl"),
+                include_str!("preview.wgsl"),
+            ),
+            wgpu::TextureFormat::Rgba16Float,
+            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+        )?;
+        let object_pipeline = effects::create_pipeline(
+            &device,
+            [&image_layout, &params_layout],
+            "standard draw",
+            (include_str!("preview/object.wgsl"), ""),
             wgpu::TextureFormat::Rgba16Float,
             Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
         )?;
@@ -452,6 +466,7 @@ impl Gpu {
                 queue,
                 pipeline,
                 effect_pipeline,
+                object_pipeline,
                 image_layout,
                 params_layout,
                 sampler,

@@ -14,15 +14,13 @@ pub struct ImageAsset {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum OutputDestination {
-    Canvas,
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub enum ObjectKind {
     Input {
         input: EffectInstance,
-        output: OutputDestination,
+        output: EffectInstance,
+    },
+    Camera {
+        settings: EffectInstance,
     },
     Filter,
     Effect,
@@ -54,22 +52,31 @@ impl Clip {
             },
             ObjectKind::Filter => "フィルタオブジェクト",
             ObjectKind::Effect => "エフェクトオブジェクト",
+            ObjectKind::Camera { .. } => "カメラ制御",
         }
     }
 
     pub fn instances(&self) -> impl Iterator<Item = &EffectInstance> {
-        let input = match &self.kind {
-            ObjectKind::Input { input, .. } => Some(input),
-            _ => None,
+        let fixed = match &self.kind {
+            ObjectKind::Input { input, output } => [Some(input), Some(output)],
+            ObjectKind::Camera { settings } => [Some(settings), None],
+            _ => [None, None],
         };
-        input.into_iter().chain(&self.effects)
+        fixed.into_iter().flatten().chain(&self.effects)
     }
 
     pub fn instance_mut(&mut self, id: u64) -> &mut EffectInstance {
-        if let ObjectKind::Input { input, .. } = &mut self.kind
-            && input.id == id
-        {
-            return input;
+        match &mut self.kind {
+            ObjectKind::Input { input, output } => {
+                if input.id == id {
+                    return input;
+                }
+                if output.id == id {
+                    return output;
+                }
+            }
+            ObjectKind::Camera { settings } if settings.id == id => return settings,
+            _ => {}
         }
         self.effects
             .iter_mut()
@@ -262,7 +269,7 @@ impl Timeline {
             match clip.kind {
                 ObjectKind::Input { .. } => target = Some(clip.id),
                 ObjectKind::Filter => target = None,
-                ObjectKind::Effect => {}
+                ObjectKind::Effect | ObjectKind::Camera { .. } => {}
             }
         }
         None

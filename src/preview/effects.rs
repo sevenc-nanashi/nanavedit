@@ -1,13 +1,19 @@
 use super::*;
+use crate::effects::camera::CameraParams;
 use crate::effects::{EffectInstance, Param, Resource};
-use crate::timeline::{ObjectKind, OutputDestination};
+use crate::timeline::ObjectKind;
 use wgpu::util::DeviceExt;
+#[path = "transform.rs"]
+mod transform;
+
+const SCENE_SIZE: (u32, u32) = (1920, 1080);
 
 pub(super) struct GpuResources {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub pipeline: wgpu::RenderPipeline,
     pub effect_pipeline: wgpu::RenderPipeline,
+    pub object_pipeline: wgpu::RenderPipeline,
     pub image_layout: wgpu::BindGroupLayout,
     pub params_layout: wgpu::BindGroupLayout,
     pub sampler: wgpu::Sampler,
@@ -24,6 +30,7 @@ pub(super) fn depends_on_time(objects: &[Clip]) -> bool {
             ObjectKind::Filter => has_input = false,
             ObjectKind::Effect if !has_input => continue,
             ObjectKind::Effect => {}
+            ObjectKind::Camera { .. } => continue,
         }
         if object
             .instances()
@@ -104,7 +111,7 @@ impl ProcessContext<'_> {
             &self.resources.device,
             [&self.resources.image_layout, &self.resources.params_layout],
             label,
-            fragment,
+            (include_str!("vertex.wgsl"), fragment),
             wgpu::TextureFormat::Rgba16Float,
             None,
         )
@@ -131,6 +138,7 @@ impl ProcessContext<'_> {
                 height: target.height,
                 load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                 fit: false,
+                vertices: 3,
             },
             pipeline,
             uniform,
@@ -143,7 +151,7 @@ pub(super) fn create_pipeline(
     device: &wgpu::Device,
     layouts: [&wgpu::BindGroupLayout; 2],
     label: &str,
-    fragment: &str,
+    shader: (&str, &str),
     format: wgpu::TextureFormat,
     blend: Option<wgpu::BlendState>,
 ) -> Result<wgpu::RenderPipeline> {
@@ -151,9 +159,7 @@ pub(super) fn create_pipeline(
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         // DXC treats this label as a filename and rejects non-ASCII names.
         label: Some("effect shader"),
-        source: wgpu::ShaderSource::Wgsl(
-            format!("{}\n{fragment}", include_str!("vertex.wgsl")).into(),
-        ),
+        source: wgpu::ShaderSource::Wgsl(format!("{}\n{}", shader.0, shader.1).into()),
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(label),
@@ -197,6 +203,7 @@ struct DrawTarget<'a> {
     height: u32,
     load: wgpu::LoadOp<wgpu::Color>,
     fit: bool,
+    vertices: u32,
 }
 
 pub struct Source {
@@ -229,14 +236,39 @@ struct EvaluationContext<'a> {
     screen_size: (u32, u32),
 }
 
+#[derive(Clone, Copy)]
+pub enum BlendMode {
+    Normal,
+}
+
 pub struct RenderParams {
     pub alpha: f32,
+    pub position: [f32; 3],
+    pub center: [f32; 3],
+    pub rotation: [f32; 3],
+    pub scale: [f32; 3],
+    pub blend: BlendMode,
+    pub camera_enabled: bool,
 }
 
 impl Default for RenderParams {
     fn default() -> Self {
-        Self { alpha: 1.0 }
+        Self {
+            alpha: 1.0,
+            position: [0.0; 3],
+            center: [0.0; 3],
+            rotation: [0.0; 3],
+            scale: [1.0; 3],
+            blend: BlendMode::Normal,
+            camera_enabled: false,
+        }
     }
+}
+
+struct RenderItem {
+    source: Source,
+    params: RenderParams,
+    camera: Option<(u64, CameraParams)>,
 }
 
 struct Pass {
@@ -256,6 +288,130 @@ impl Default for Pass {
 }
 
 impl GpuResources {
+    fn draw_quad(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        item: &RenderItem,
+        scene: &Source,
+        geometry: ([[f32; 4]; 4], [[f32; 2]; 4]),
+    ) {
+        let mut values: Vec<f32> = geometry.0.into_iter().flatten().collect();
+        for uv in geometry.1 {
+            values.extend([uv[0], uv[1], 0.0, 0.0]);
+        }
+        values.extend([
+            item.params.alpha,
+            if item.source.premultiplied { 1.0 } else { 0.0 },
+            0.0,
+            0.0,
+        ]);
+        let bytes: Vec<u8> = values.into_iter().flat_map(f32::to_le_bytes).collect();
+        self.draw(
+            encoder,
+            &item.source,
+            DrawTarget {
+                view: &scene.view,
+                width: scene.width,
+                height: scene.height,
+                load: wgpu::LoadOp::Load,
+                fit: false,
+                vertices: 6,
+            },
+            &self.object_pipeline,
+            &bytes,
+        );
+    }
+
+    fn draw_object(&self, encoder: &mut wgpu::CommandEncoder, item: &RenderItem, scene: &Source) {
+        let projection = transform::Projection::new(None).expect("ordinary projection");
+        self.draw_quad(
+            encoder,
+            item,
+            scene,
+            (
+                projection.corners(item.source.width, item.source.height, &item.params),
+                [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+            ),
+        );
+    }
+
+    fn render_camera(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        items: Vec<RenderItem>,
+        scene: &Source,
+        camera: CameraParams,
+    ) {
+        if let Some(projection) = transform::Projection::new(Some(camera)) {
+            for polygon in transform::camera_polygons(&items, &projection) {
+                let item = &items[polygon.item];
+                let vertices = &polygon.vertices;
+                if vertices.len() == 4 {
+                    let quad = [vertices[0], vertices[1], vertices[3], vertices[2]];
+                    self.draw_quad(
+                        encoder,
+                        item,
+                        scene,
+                        (quad.map(|v| projection.clip(v.point)), quad.map(|v| v.uv)),
+                    );
+                } else {
+                    for i in 1..vertices.len() - 1 {
+                        let quad = [vertices[0], vertices[i], vertices[i + 1], vertices[i + 1]];
+                        self.draw_quad(
+                            encoder,
+                            item,
+                            scene,
+                            (quad.map(|v| projection.clip(v.point)), quad.map(|v| v.uv)),
+                        );
+                    }
+                }
+            }
+        }
+        for item in items {
+            if !item.params.camera_enabled {
+                self.draw_object(encoder, &item, scene);
+            }
+            self.release(item.source);
+        }
+    }
+
+    fn render_segment(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        items: &mut Vec<RenderItem>,
+        scene: &Source,
+    ) {
+        let mut last = HashMap::new();
+        for (index, item) in items.iter().enumerate() {
+            if item.params.alpha > 0.0
+                && let Some((id, _)) = item.camera
+            {
+                last.insert(id, index);
+            }
+        }
+        let mut groups: HashMap<u64, Vec<RenderItem>> = HashMap::new();
+        for (index, item) in items.drain(..).enumerate() {
+            if item.params.alpha <= 0.0 {
+                self.release(item.source);
+                continue;
+            }
+            if let Some((id, camera)) = item.camera {
+                groups.entry(id).or_default().push(item);
+                if last[&id] == index {
+                    self.render_camera(
+                        encoder,
+                        groups.remove(&id).expect("camera group exists"),
+                        scene,
+                        camera,
+                    );
+                }
+            } else {
+                self.draw_object(encoder, &item, scene);
+                self.release(item.source);
+            }
+        }
+    }
+
     pub(super) fn source(
         &self,
         view: wgpu::TextureView,
@@ -357,6 +513,7 @@ impl GpuResources {
                 height,
                 load: settings.load,
                 fit: true,
+                vertices: 3,
             },
             if settings.present {
                 &self.pipeline
@@ -396,6 +553,7 @@ impl GpuResources {
             height,
             load,
             fit,
+            vertices,
         } = target;
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("effect / composite"),
@@ -427,7 +585,7 @@ impl GpuResources {
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &source.binding, &[]);
         pass.set_bind_group(1, &binding, &[]);
-        pass.draw(0..3, 0..1);
+        pass.draw(0..vertices, 0..1);
     }
 }
 
@@ -460,9 +618,11 @@ impl Gpu {
         let result = (|| {
             let processor = match self.processors.entry(effect.type_id) {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert((definition.create_processor)(&context)?)
-                }
+                std::collections::hash_map::Entry::Vacant(entry) => entry.insert((definition
+                    .create_processor
+                    .expect("image effect has a processor"))(
+                    &context
+                )?),
             };
             processor.process(source, &effect.params, params, &mut context)
         })();
@@ -487,27 +647,6 @@ impl Gpu {
         Ok(source)
     }
 
-    fn flush_input(
-        &mut self,
-        pending: &mut Option<(Source, RenderParams)>,
-        scene: &Source,
-        encoder: &mut wgpu::CommandEncoder,
-    ) {
-        if let Some((source, params)) = pending.take() {
-            self.resources.render_pass(
-                encoder,
-                &source,
-                (&scene.view, scene.width, scene.height),
-                Pass {
-                    alpha: params.alpha,
-                    load: wgpu::LoadOp::Load,
-                    ..Default::default()
-                },
-            );
-            self.resources.release(source);
-        }
-    }
-
     pub(super) fn render_objects(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -517,7 +656,8 @@ impl Gpu {
     ) -> Result<()> {
         // shortcut: pool sizes follow this evaluation; add a global budget for large projects.
         self.resources.used_sizes.clear();
-        let mut scene = self.resources.acquire(width, height)?;
+        let (scene_width, scene_height) = SCENE_SIZE;
+        let mut scene = self.resources.acquire(scene_width, scene_height)?;
         {
             let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("clear scene"),
@@ -533,45 +673,67 @@ impl Gpu {
                 ..Default::default()
             });
         }
-        let mut pending = None;
+        let mut pending: Option<RenderItem> = None;
+        let mut segment = Vec::new();
+        let mut active_camera: Option<(u64, usize, CameraParams)> = None;
         for object in self.visible.clone() {
             let context = EvaluationContext {
                 object: &object,
                 scene_frame: self.frame,
-                screen_size: (width, height),
+                screen_size: SCENE_SIZE,
             };
             match &object.kind {
-                ObjectKind::Input {
-                    input,
-                    output: OutputDestination::Canvas,
-                } => {
-                    self.flush_input(&mut pending, &scene, encoder);
+                ObjectKind::Input { input, output } => {
+                    segment.extend(pending.take());
                     let mut params = RenderParams::default();
                     let source = self
                         .evaluate(None, &mut params, input, &context, encoder)
                         .with_context(|| {
                             format!("入力オブジェクト {}（{}）", object.id, object.name())
                         })?;
+                    let source =
+                        self.evaluate(Some(source), &mut params, output, &context, encoder)?;
                     let source = self.evaluate_effects(source, &mut params, &context, encoder)?;
-                    pending = Some((source, params));
+                    let camera = active_camera
+                        .filter(|(_, layer, camera)| {
+                            camera.layers == 0 || object.layer - layer <= camera.layers
+                        })
+                        .map(|(id, _, camera)| (id, camera));
+                    pending = Some(RenderItem {
+                        source,
+                        params,
+                        camera,
+                    });
+                }
+                ObjectKind::Camera { settings } => {
+                    active_camera = Some((
+                        object.id,
+                        object.layer,
+                        CameraParams::evaluate(&settings.params),
+                    ));
                 }
                 ObjectKind::Effect => {
-                    if let Some((source, mut params)) = pending.take() {
-                        let source =
-                            self.evaluate_effects(source, &mut params, &context, encoder)?;
-                        pending = Some((source, params));
+                    if let Some(mut item) = pending.take() {
+                        item.source = self.evaluate_effects(
+                            item.source,
+                            &mut item.params,
+                            &context,
+                            encoder,
+                        )?;
+                        pending = Some(item);
                     }
                 }
                 ObjectKind::Filter => {
-                    self.flush_input(&mut pending, &scene, encoder);
+                    segment.extend(pending.take());
+                    self.resources.render_segment(encoder, &mut segment, &scene);
                     let mut params = RenderParams::default();
                     scene = self.evaluate_effects(scene, &mut params, &context, encoder)?;
                     if params.alpha != 1.0 {
-                        let target = self.resources.acquire(width, height)?;
+                        let target = self.resources.acquire(scene_width, scene_height)?;
                         self.resources.render_pass(
                             encoder,
                             &scene,
-                            (&target.view, width, height),
+                            (&target.view, scene_width, scene_height),
                             Pass {
                                 alpha: params.alpha,
                                 ..Default::default()
@@ -583,7 +745,8 @@ impl Gpu {
                 }
             }
         }
-        self.flush_input(&mut pending, &scene, encoder);
+        segment.extend(pending.take());
+        self.resources.render_segment(encoder, &mut segment, &scene);
         self.resources.render_pass(
             encoder,
             &scene,

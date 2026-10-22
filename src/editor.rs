@@ -55,6 +55,13 @@ pub struct Editor {
     pointer_down: bool,
     effect_drag: Option<(u64, &'static str)>,
     effects_focus: FocusHandle,
+    number_inputs: std::collections::HashMap<
+        (u64, &'static str),
+        gpui::Entity<gpui_kit::prelude::NumberInput>,
+    >,
+    choice_inputs:
+        std::collections::HashMap<(u64, &'static str), gpui::Entity<gpui_kit::prelude::Select>>,
+    number_edit: Option<(u64, &'static str)>,
     #[cfg(target_os = "windows")]
     preview: Option<crate::preview::Preview>,
     loading: bool,
@@ -178,6 +185,9 @@ impl Editor {
             pointer_down: false,
             effect_drag: None,
             effects_focus,
+            number_inputs: Default::default(),
+            choice_inputs: Default::default(),
+            number_edit: None,
             #[cfg(target_os = "windows")]
             preview,
             loading: false,
@@ -533,7 +543,9 @@ impl Render for Editor {
                 cx.listener(|editor, event: &gpui::MouseMoveEvent, window, cx| {
                     editor.move_clip_drag(event, cx);
                     if event.pressed_button != Some(MouseButton::Left) {
-                        editor.finish_effect_edit(false, cx);
+                        if editor.number_edit.is_none() {
+                            editor.finish_effect_edit(false, cx);
+                        }
                         editor.pointer_down = false;
                         editor.effect_drag = None;
                         editor.effect_cancelled = false;
@@ -557,7 +569,9 @@ impl Render for Editor {
                 cx.listener(|editor, _, _, cx| {
                     editor.drag = None;
                     editor.finish_clip_drag(false, cx);
-                    editor.finish_effect_edit(false, cx);
+                    if editor.number_edit.is_none() {
+                        editor.finish_effect_edit(false, cx);
+                    }
                     editor.effect_cancelled = false;
                     editor.pointer_down = false;
                     editor.effect_drag = None;
@@ -568,7 +582,9 @@ impl Render for Editor {
                 cx.listener(|editor, _, _, cx| {
                     editor.drag = None;
                     editor.finish_clip_drag(false, cx);
-                    editor.finish_effect_edit(false, cx);
+                    if editor.number_edit.is_none() {
+                        editor.finish_effect_edit(false, cx);
+                    }
                     editor.effect_cancelled = false;
                     editor.pointer_down = false;
                     editor.effect_drag = None;
@@ -587,13 +603,9 @@ impl Render for Editor {
                         ),
                     )
                     .child(self.divider(Panel::Settings, cx))
-                    .child(
-                        div()
-                            .w(px(self.settings_width))
-                            .h_full()
-                            .flex_none()
-                            .child(panel("設定", &theme).child(self.selection_details(&theme, cx))),
-                    ),
+                    .child(div().w(px(self.settings_width)).h_full().flex_none().child(
+                        panel("設定", &theme).child(self.selection_details(&theme, window, cx)),
+                    )),
             )
             .child(self.object_menu.clone())
             .child(self.effect_menu.clone())

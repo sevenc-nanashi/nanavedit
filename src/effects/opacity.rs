@@ -10,6 +10,8 @@ pub(super) fn definition() -> EffectDefinition {
                 id: "opacity",
                 name: "不透明度",
                 default: ParamValue::Integer(100),
+                choices: &[],
+                group: None,
                 number: Some(NumberDefinition {
                     min: 0.0,
                     max: 100.0,
@@ -22,7 +24,7 @@ pub(super) fn definition() -> EffectDefinition {
             time_dependent: false,
         },
         #[cfg(target_os = "windows")]
-        create_processor: |_| Ok(Box::new(Opacity)),
+        create_processor: Some(|_| Ok(Box::new(Opacity))),
     }
 }
 

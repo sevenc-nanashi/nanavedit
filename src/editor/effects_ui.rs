@@ -1,7 +1,10 @@
 use super::*;
 use crate::effects::{ParamDefinition, ParamValue};
-use crate::timeline::{FPS, ObjectKind, OutputDestination};
-use gpui_kit::prelude::{Checkbox, Slider};
+use crate::timeline::{FPS, ObjectKind};
+use gpui::Focusable;
+use gpui_kit::prelude::{
+    Checkbox, NumberInput, NumberInputEvent, Select, SelectEvent, SelectOption, Slider,
+};
 
 #[derive(Clone, Copy)]
 pub(super) enum CreationTarget {
@@ -69,14 +72,21 @@ impl Editor {
     ) {
         let instance = EffectInstance::new(self.timeline.allocate_id(), definition, resources);
         match target {
-            CreationTarget::Input { layer, frame } => self.timeline.add_object(
-                ObjectKind::Input {
-                    input: instance,
-                    output: OutputDestination::Canvas,
-                },
-                layer,
-                frame,
-            ),
+            CreationTarget::Input { layer, frame } => {
+                let output = EffectInstance::new(
+                    self.timeline.allocate_id(),
+                    crate::effects::definition("builtin.standard_draw"),
+                    Vec::new(),
+                );
+                self.timeline.add_object(
+                    ObjectKind::Input {
+                        input: instance,
+                        output,
+                    },
+                    layer,
+                    frame,
+                );
+            }
             CreationTarget::Effect { clip_id } => {
                 let before = self.timeline.document.clone();
                 self.timeline
@@ -150,18 +160,19 @@ impl Editor {
             .find(|p| p.id == definition.id)
             .expect("edited parameter exists")
             .value = value;
-        if matches!(value, ParamValue::Bool(_)) {
+        if matches!(value, ParamValue::Bool(_) | ParamValue::Choice(_)) {
             self.finish_effect_edit(false, cx);
         }
         cx.notify();
     }
 
     fn param_control(
-        &self,
+        &mut self,
         clip_id: u64,
         effect: &EffectInstance,
         definition: &'static ParamDefinition,
         value: ParamValue,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let effect_id = effect.id;
@@ -188,7 +199,65 @@ impl Editor {
                 .into_any_element(),
             ParamValue::Integer(_) | ParamValue::Float(_) => {
                 let number = definition.number.expect("numeric parameter has a range");
-                Slider::new(id)
+                let key = (effect_id, param_id);
+                let input = if let Some(input) = self.number_inputs.get(&key) {
+                    input.clone()
+                } else {
+                    let input = cx.new(|cx| {
+                        NumberInput::new(format!("{id}-number"), window, cx)
+                            .name(definition.name)
+                            .value(value.number() as f64)
+                            .range(number.min as f64, number.max as f64)
+                            .step(number.step as f64)
+                            .precision(number.precision)
+                            .unit(number.unit)
+                            .required(true)
+                            .control_size(ControlSize::Sm)
+                    });
+                    cx.subscribe(&input, move |editor, input, event, cx| match event {
+                        NumberInputEvent::Changed(value) => {
+                            editor.number_edit = Some(key);
+                            let valid = value.is_finite()
+                                && (number.min as f64..=number.max as f64).contains(value)
+                                && (!matches!(definition.default, ParamValue::Integer(_))
+                                    || value.fract() == 0.0);
+                            input.update(cx, |input, cx| input.set_invalid(!valid, cx));
+                            if valid {
+                                editor.change_param(
+                                    clip_id,
+                                    effect_id,
+                                    definition,
+                                    definition.slider_value(*value as f32),
+                                    cx,
+                                );
+                            }
+                        }
+                        NumberInputEvent::Unparsable(_) => {
+                            editor.number_edit = Some(key);
+                        }
+                        NumberInputEvent::Submit => editor.finish_effect_edit(false, cx),
+                    })
+                    .detach();
+                    let focus = input.read(cx).field().read(cx).focus_handle(cx);
+                    cx.on_blur(&focus, window, |editor, _, cx| {
+                        editor.finish_effect_edit(false, cx)
+                    })
+                    .detach();
+                    self.number_inputs.insert(key, input.clone());
+                    input
+                };
+                input.update(cx, |input, cx| {
+                    if input.is_disabled() != disabled {
+                        input.set_disabled(disabled, cx);
+                    }
+                    if self.number_edit != Some(key)
+                        && input.current() != Some(value.number() as f64)
+                    {
+                        input.set_value(value.number() as f64, cx);
+                        input.set_invalid(false, cx);
+                    }
+                });
+                let slider = Slider::new(id)
                     .label(definition.name)
                     .range(number.min, number.max)
                     .step(number.step)
@@ -210,7 +279,67 @@ impl Editor {
                                 cx,
                             )
                         });
+                    });
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(slider)
+                    .child(input)
+                    .into_any_element()
+            }
+            ParamValue::Choice(value) => {
+                let key = (effect_id, param_id);
+                let input = if let Some(input) = self.choice_inputs.get(&key) {
+                    input.clone()
+                } else {
+                    let input = cx.new(|cx| {
+                        Select::new(id, window, cx)
+                            .name(definition.name)
+                            .options(
+                                definition
+                                    .choices
+                                    .iter()
+                                    .map(|(id, label)| SelectOption::new(*id, *label)),
+                            )
+                            .selected(value)
+                            .control_size(ControlSize::Sm)
+                    });
+                    cx.subscribe(&input, move |editor, _, event, cx| {
+                        if let SelectEvent::Selected(id) = event {
+                            let value = definition
+                                .choices
+                                .iter()
+                                .find(|(value, _)| *value == id.as_ref())
+                                .expect("declared choice")
+                                .0;
+                            editor.change_param(
+                                clip_id,
+                                effect_id,
+                                definition,
+                                ParamValue::Choice(value),
+                                cx,
+                            );
+                        }
                     })
+                    .detach();
+                    self.choice_inputs.insert(key, input.clone());
+                    input
+                };
+                input.update(cx, |input, cx| {
+                    if input.selected_id().map(|v| v.as_ref()) != Some(value) {
+                        input.set_selected(Some(value.into()), cx);
+                    }
+                    if input.is_disabled() != disabled {
+                        input.set_disabled(disabled, cx);
+                    }
+                });
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(definition.name)
+                    .child(input)
                     .into_any_element()
             }
         };
@@ -236,6 +365,22 @@ impl Editor {
             }
             self.sync_timeline();
             cx.notify();
+        }
+        if let Some(key) = self.number_edit.take() {
+            let value = self
+                .timeline
+                .document
+                .clips
+                .iter()
+                .flat_map(|clip| clip.instances())
+                .find(|effect| effect.id == key.0)
+                .map(|effect| crate::effects::param(&effect.params, key.1));
+            if let (Some(input), Some(value)) = (self.number_inputs.get(&key), value) {
+                input.update(cx, |input, cx| {
+                    input.set_value(value.number() as f64, cx);
+                    input.set_invalid(false, cx);
+                });
+            }
         }
     }
 
@@ -302,11 +447,21 @@ impl Editor {
     }
 
     pub(super) fn selection_details(
-        &self,
+        &mut self,
         theme: &Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let Some(clip) = self.timeline.selected_clip() else {
+        let clip = self.timeline.selected_clip().cloned();
+        self.number_inputs.retain(|(id, _), _| {
+            clip.as_ref()
+                .is_some_and(|c| c.instances().any(|e| e.id == *id))
+        });
+        self.choice_inputs.retain(|(id, _), _| {
+            clip.as_ref()
+                .is_some_and(|c| c.instances().any(|e| e.id == *id))
+        });
+        let Some(clip) = clip else {
             return empty_message("オブジェクトが選択されていません", theme).into_any_element();
         };
         let mut details = div()
@@ -337,26 +492,32 @@ impl Editor {
         }
         let entity = cx.entity().downgrade();
         let bounds = self.effect_menu_bounds.clone();
-        details = details.child(
-            div()
-                .on_children_prepainted(move |children, _, _| {
-                    if let Some(first) = children.first() {
-                        bounds.set(*first);
-                    }
-                })
-                .child(
-                    Button::new("add-effect")
-                        .label("エフェクトを追加")
-                        .secondary()
-                        .control_size(ControlSize::Sm)
-                        .disabled(self.loading)
-                        .on_click(move |window, cx| {
-                            let _ =
-                                entity.update(cx, |editor, cx| editor.open_effect_menu(window, cx));
-                        }),
-                ),
-        );
-        let input_count = usize::from(matches!(clip.kind, ObjectKind::Input { .. }));
+        if !matches!(clip.kind, ObjectKind::Camera { .. }) {
+            details = details.child(
+                div()
+                    .on_children_prepainted(move |children, _, _| {
+                        if let Some(first) = children.first() {
+                            bounds.set(*first);
+                        }
+                    })
+                    .child(
+                        Button::new("add-effect")
+                            .label("エフェクトを追加")
+                            .secondary()
+                            .control_size(ControlSize::Sm)
+                            .disabled(self.loading)
+                            .on_click(move |window, cx| {
+                                let _ = entity
+                                    .update(cx, |editor, cx| editor.open_effect_menu(window, cx));
+                            }),
+                    ),
+            );
+        }
+        let input_count = match clip.kind {
+            ObjectKind::Input { .. } => 2,
+            ObjectKind::Camera { .. } => 1,
+            _ => 0,
+        };
         for (position, effect) in clip.instances().enumerate() {
             let id = effect.id;
             let info = &effect.definition().info;
@@ -368,7 +529,7 @@ impl Editor {
                 .border_1()
                 .border_color(theme.colors.divider);
             if position < input_count {
-                card = card.child(format!("入力: {}", info.name));
+                card = card.child(info.name);
             } else {
                 let index = position - input_count;
                 card = card.child(format!("{}. {}", index + 1, info.name)).child(
@@ -410,9 +571,17 @@ impl Editor {
                         )),
                 );
             }
+            let mut group = None;
             for definition in info.param_definitions {
+                if definition.group != group {
+                    group = definition.group;
+                    if let Some(group) = group {
+                        card = card.child(div().mt_2().child(group));
+                    }
+                }
                 let value = crate::effects::param(&effect.params, definition.id);
-                card = card.child(self.param_control(clip.id, effect, definition, value, cx));
+                card =
+                    card.child(self.param_control(clip.id, effect, definition, value, window, cx));
             }
             details = details.child(card);
         }
@@ -452,10 +621,12 @@ impl Editor {
             )
             .capture_key_up(cx.listener(|editor, event: &gpui::KeyUpEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
-                if matches!(
-                    key,
-                    "left" | "right" | "up" | "down" | "home" | "end" | "tab"
-                ) {
+                if editor.number_edit.is_none()
+                    && matches!(
+                        key,
+                        "left" | "right" | "up" | "down" | "home" | "end" | "tab"
+                    )
+                {
                     editor.finish_effect_edit(false, cx);
                     editor.effect_cancelled = false;
                 }

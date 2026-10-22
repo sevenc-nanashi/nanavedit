@@ -11,11 +11,11 @@ pub(super) fn definition() -> EffectDefinition {
             time_dependent: false,
         },
         #[cfg(target_os = "windows")]
-        create_processor: |context| {
+        create_processor: Some(|context| {
             Ok(Box::new(Invert {
                 pipeline: context.create_pipeline("invert", include_str!("invert.wgsl"))?,
             }))
-        },
+        }),
     }
 }
 

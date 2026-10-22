@@ -1,9 +1,11 @@
 use crate::timeline::ImageAsset;
 use std::{collections::HashSet, rc::Rc, sync::LazyLock};
 
+pub mod camera;
 mod image;
 mod invert;
 mod opacity;
+mod standard_draw;
 
 #[cfg(target_os = "windows")]
 pub use crate::preview::effects::{EffectProcessor, ProcessContext, RenderParams, Source};
@@ -13,6 +15,7 @@ pub enum ParamValue {
     Integer(i32),
     Float(f32),
     Bool(bool),
+    Choice(&'static str),
 }
 
 impl ParamValue {
@@ -20,7 +23,7 @@ impl ParamValue {
         match self {
             Self::Integer(value) => value as f32,
             Self::Float(value) => value,
-            Self::Bool(_) => panic!("boolean parameter is not numeric"),
+            Self::Bool(_) | Self::Choice(_) => panic!("parameter is not numeric"),
         }
     }
 }
@@ -40,6 +43,8 @@ pub struct ParamDefinition {
     pub name: &'static str,
     pub default: ParamValue,
     pub number: Option<NumberDefinition>,
+    pub choices: &'static [(&'static str, &'static str)],
+    pub group: Option<&'static str>,
 }
 
 impl ParamDefinition {
@@ -50,7 +55,7 @@ impl ParamDefinition {
         match self.default {
             ParamValue::Integer(_) => ParamValue::Integer(value.round() as i32),
             ParamValue::Float(_) => ParamValue::Float(value),
-            ParamValue::Bool(_) => unreachable!("numeric parameter"),
+            _ => unreachable!("numeric parameter"),
         }
     }
 }
@@ -73,6 +78,8 @@ pub fn param(params: &[Param], id: &str) -> ParamValue {
 pub enum EffectRole {
     Input,
     Effect,
+    Output,
+    Camera,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,8 +101,11 @@ pub struct EffectInfo {
 pub struct EffectDefinition {
     pub info: EffectInfo,
     #[cfg(target_os = "windows")]
-    pub create_processor: fn(&ProcessContext<'_>) -> anyhow::Result<Box<dyn EffectProcessor>>,
+    pub create_processor: Option<ProcessorFactory>,
 }
+
+#[cfg(target_os = "windows")]
+pub type ProcessorFactory = fn(&ProcessContext<'_>) -> anyhow::Result<Box<dyn EffectProcessor>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Resource {
@@ -149,10 +159,18 @@ pub fn definitions() -> &'static [EffectDefinition] {
             image::definition(),
             opacity::definition(),
             invert::definition(),
+            standard_draw::definition(),
+            camera::definition(),
         ];
         let mut ids = HashSet::new();
         for definition in &definitions {
             let info = &definition.info;
+            #[cfg(target_os = "windows")]
+            assert_eq!(
+                definition.create_processor.is_none(),
+                info.role == EffectRole::Camera,
+                "only camera settings use the separate camera evaluator"
+            );
             assert!(
                 !info.id.is_empty() && ids.insert(info.id),
                 "duplicate or empty effect ID: {}",
@@ -161,6 +179,10 @@ pub fn definitions() -> &'static [EffectDefinition] {
             let mut param_ids = HashSet::new();
             for param in info.param_definitions {
                 assert!(
+                    matches!(param.default, ParamValue::Choice(_)) || param.choices.is_empty(),
+                    "choices require a choice parameter"
+                );
+                assert!(
                     !param.id.is_empty() && param_ids.insert(param.id),
                     "duplicate or empty parameter ID: {} / {}",
                     info.id,
@@ -168,6 +190,16 @@ pub fn definitions() -> &'static [EffectDefinition] {
                 );
                 match (param.default, param.number) {
                     (ParamValue::Bool(_), None) => {}
+                    (ParamValue::Choice(value), None) => {
+                        let mut choices = HashSet::new();
+                        assert!(
+                            param
+                                .choices
+                                .iter()
+                                .all(|(id, _)| !id.is_empty() && choices.insert(*id))
+                        );
+                        assert!(choices.contains(value), "choice default must be declared");
+                    }
                     (ParamValue::Integer(_) | ParamValue::Float(_), Some(number)) => {
                         assert!(
                             number.min.is_finite()

@@ -18,7 +18,7 @@ pub(super) enum Drag {
     Seek,
     Clip {
         before: Document,
-        original: Clip,
+        original: Box<Clip>,
         x: f32,
         edit: Edit,
     },
@@ -142,6 +142,7 @@ impl Editor {
         items.extend([
             gpui_kit::prelude::MenuItem::command("filter", "フィルタオブジェクトを追加"),
             gpui_kit::prelude::MenuItem::command("effect", "エフェクトオブジェクトを追加"),
+            gpui_kit::prelude::MenuItem::command("camera", "カメラ制御を追加"),
         ]);
         let result = self.object_menu.update(cx, |menu, cx| {
             menu.set_items(items, window, cx)?;
@@ -171,6 +172,15 @@ impl Editor {
             match id {
                 "filter" => self.timeline.add_object(ObjectKind::Filter, layer, frame),
                 "effect" => self.timeline.add_object(ObjectKind::Effect, layer, frame),
+                "camera" => {
+                    let settings = EffectInstance::new(
+                        self.timeline.allocate_id(),
+                        crate::effects::definition("builtin.camera"),
+                        Vec::new(),
+                    );
+                    self.timeline
+                        .add_object(ObjectKind::Camera { settings }, layer, frame);
+                }
                 _ => unreachable!("known object menu command"),
             }
         }
@@ -233,7 +243,7 @@ impl Editor {
                 };
                 self.clip_drag = Some(Drag::Clip {
                     before: self.timeline.document.clone(),
-                    original,
+                    original: Box::new(original),
                     x: position.x,
                     edit,
                 });
@@ -258,7 +268,7 @@ impl Editor {
                 original, x, edit, ..
             } => {
                 let delta = ((position.x - x) / self.timeline.zoom).round() as i64;
-                let mut clip = original.clone();
+                let mut clip = original.as_ref().clone();
                 match edit {
                     Edit::Move => {
                         clip.start = original.start.saturating_add_signed(delta);
@@ -482,6 +492,8 @@ impl Editor {
                         (ObjectKind::Filter, false) => 0x51452c,
                         (ObjectKind::Effect, true) => 0x71528a,
                         (ObjectKind::Effect, false) => 0x4d3e5b,
+                        (ObjectKind::Camera { .. }, true) => 0x39766a,
+                        (ObjectKind::Camera { .. }, false) => 0x304d48,
                     }))
                     .border_1()
                     .border_color(if selected {

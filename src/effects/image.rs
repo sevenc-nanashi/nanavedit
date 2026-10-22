@@ -11,7 +11,7 @@ pub(super) fn definition() -> EffectDefinition {
             time_dependent: false,
         },
         #[cfg(target_os = "windows")]
-        create_processor: |_| Ok(Box::new(Image)),
+        create_processor: Some(|_| Ok(Box::new(Image))),
     }
 }
 
