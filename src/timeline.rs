@@ -92,7 +92,6 @@ impl Clip {
 #[derive(Clone, PartialEq)]
 pub struct Document {
     pub clips: Vec<Clip>,
-    pub layers: usize,
 }
 
 pub struct Timeline {
@@ -110,10 +109,7 @@ pub struct Timeline {
 impl Default for Timeline {
     fn default() -> Self {
         Self {
-            document: Document {
-                clips: Vec::new(),
-                layers: 3,
-            },
+            document: Document { clips: Vec::new() },
             selected: None,
             layer: 0,
             frame: 0,
@@ -164,7 +160,6 @@ impl Timeline {
         };
         if let Some(document) = source.pop() {
             target.push(std::mem::replace(&mut self.document, document));
-            self.layer = self.layer.min(self.document.layers - 1);
             if let Some(clip) = self.selected_clip() {
                 self.layer = clip.layer;
             } else {
@@ -212,13 +207,6 @@ impl Timeline {
         self.commit(before);
     }
 
-    pub fn add_layer(&mut self) {
-        let before = self.document.clone();
-        self.layer = self.document.layers;
-        self.document.layers += 1;
-        self.commit(before);
-    }
-
     pub fn delete_selected(&mut self) {
         let before = self.document.clone();
         self.document.clips.retain(|c| Some(c.id) != self.selected);
@@ -228,7 +216,6 @@ impl Timeline {
 
     pub fn place(&mut self, clip: Clip) -> bool {
         if clip.length == 0
-            || clip.layer >= self.document.layers
             || self.document.clips.iter().any(|other| {
                 other.id != clip.id
                     && other.layer == clip.layer

@@ -40,8 +40,9 @@ pub struct Editor {
     drag: Option<(Panel, Point<gpui::Pixels>)>,
     timeline: Timeline,
     edit_focus: FocusHandle,
-    timeline_buttons: [FocusHandle; 7],
+    timeline_buttons: [FocusHandle; 6],
     timeline_scroll: gpui::ScrollHandle,
+    timeline_layers: usize,
     timeline_bounds: Rc<Cell<gpui::Bounds<gpui::Pixels>>>,
     clip_drag: Option<timeline_ui::Drag>,
     bad_drop: bool,
@@ -172,6 +173,7 @@ impl Editor {
                     .tab_index(4 + index as isize)
             }),
             timeline_scroll: gpui::ScrollHandle::new(),
+            timeline_layers: 32,
             timeline_bounds: Rc::new(Cell::new(gpui::Bounds::default())),
             clip_drag: None,
             bad_drop: false,
@@ -491,6 +493,7 @@ fn empty_message(message: &'static str, theme: &Theme) -> Div {
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         SemanticCoordinator::global(cx).begin_frame(window);
+        self.scroll_clip_drag(window, cx);
         self.timeline.tick();
         self.sync_preview();
         if self.timeline.playing.is_some() {

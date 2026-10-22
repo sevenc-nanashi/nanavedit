@@ -2,6 +2,7 @@ use super::*;
 use crate::timeline::{Clip, Document, FPS, ObjectKind};
 use gpui::{Bounds, Pixels, canvas, point};
 use gpui_kit::prelude::ScrollArea;
+use std::time::Instant;
 
 const LABEL: f32 = 100.0;
 const RULER: f32 = 28.0;
@@ -21,6 +22,7 @@ pub(super) enum Drag {
         original: Box<Clip>,
         x: f32,
         edit: Edit,
+        scroll_at: Instant,
     },
 }
 
@@ -29,7 +31,6 @@ enum Command {
     Play,
     Undo,
     Redo,
-    Layer,
     Delete,
     ZoomIn,
     ZoomOut,
@@ -66,7 +67,6 @@ impl Editor {
             Command::Play => self.timeline.toggle_playback(),
             Command::Undo => self.timeline.undo(false),
             Command::Redo => self.timeline.undo(true),
-            Command::Layer => self.timeline.add_layer(),
             Command::Delete => self.timeline.delete_selected(),
             Command::ZoomIn | Command::ZoomOut => {
                 let old = self.timeline.zoom;
@@ -213,12 +213,6 @@ impl Editor {
             }
         } else {
             let layer = ((position.y - RULER) / ROW).floor() as usize;
-            if layer >= self.timeline.document.layers {
-                self.timeline.selected = None;
-                cx.stop_propagation();
-                cx.notify();
-                return;
-            }
             self.timeline.layer = layer;
             let x = position.x - LABEL;
             let zoom = self.timeline.zoom;
@@ -246,6 +240,7 @@ impl Editor {
                     original: Box::new(original),
                     x: position.x,
                     edit,
+                    scroll_at: Instant::now(),
                 });
             }
         }
@@ -262,6 +257,53 @@ impl Editor {
             return;
         }
         let position = self.local_position(event.position);
+        self.update_clip_drag(position, cx);
+    }
+
+    pub(super) fn scroll_clip_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Drag::Clip {
+            edit: Edit::Move,
+            scroll_at,
+            ..
+        }) = self.clip_drag.as_mut()
+        else {
+            return;
+        };
+        let now = Instant::now();
+        let elapsed = now.duration_since(*scroll_at).as_secs_f32().min(0.05);
+        *scroll_at = now;
+        let mouse = window.mouse_position();
+        let bounds = self.timeline_scroll.bounds();
+        if mouse.x < bounds.left()
+            || mouse.x >= bounds.right()
+            || mouse.y < bounds.top()
+            || mouse.y >= bounds.bottom()
+        {
+            return;
+        }
+        let direction = if mouse.y >= bounds.bottom() - px(ROW) {
+            1.0
+        } else if mouse.y < bounds.top() + px(ROW) {
+            -1.0
+        } else {
+            return;
+        };
+        let mut offset = self.timeline_scroll.offset();
+        let height = RULER + self.timeline_layers as f32 * ROW;
+        let limit = (height - f32::from(bounds.size.height)).max(0.0);
+        let next = (f32::from(offset.y) - direction * ROW * 8.0 * elapsed).clamp(-limit, 0.0);
+        let delta = f32::from(offset.y) - next;
+        if delta != 0.0 {
+            let mut position = self.local_position(mouse);
+            position.y += delta;
+            offset.y = px(next);
+            self.timeline_scroll.set_offset(offset);
+            self.update_clip_drag(position, cx);
+            window.request_animation_frame();
+        }
+    }
+
+    fn update_clip_drag(&mut self, position: Point<f32>, cx: &mut Context<Self>) {
         match self.clip_drag.as_ref().expect("active drag") {
             Drag::Seek => self.seek(position.x),
             Drag::Clip {
@@ -345,7 +387,6 @@ impl Editor {
                 Command::Redo,
                 !self.timeline.can_redo(),
             ),
-            ("timeline-layer", "レイヤー追加", Command::Layer, false),
             (
                 "timeline-delete",
                 "削除",
@@ -391,8 +432,17 @@ impl Editor {
         )))
     }
 
-    pub(super) fn timeline_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn timeline_content(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
+        let viewport_height = self.timeline_height - HEADER - theme.measures.scrollbar_track;
+        let top = -f32::from(self.timeline_scroll.offset().y);
+        let first_layer = (((top - RULER).max(0.0) / ROW).floor() as usize).saturating_sub(1);
+        let last_layer = ((top + viewport_height - RULER).max(0.0) / ROW).ceil() as usize + 1;
+        // Keep empty rows ahead of the viewport without adding them to document history.
+        self.timeline_layers = self.timeline_layers.max(last_layer + 32);
+        for clip in &self.timeline.document.clips {
+            self.timeline_layers = self.timeline_layers.max(clip.layer + 1);
+        }
         let zoom = self.timeline.zoom;
         let frames = self
             .timeline
@@ -400,7 +450,7 @@ impl Editor {
             .max(self.timeline.frame + FPS * 5)
             .max(FPS * 30);
         let width = LABEL + frames as f32 * zoom;
-        let height = RULER + self.timeline.document.layers as f32 * ROW;
+        let height = RULER + self.timeline_layers as f32 * ROW;
         let bounds = self.timeline_bounds.clone();
         let mut content = div()
             .relative()
@@ -445,7 +495,7 @@ impl Editor {
                     ),
             );
         }
-        for layer in 0..self.timeline.document.layers {
+        for layer in first_layer..last_layer {
             content = content.child(
                 div()
                     .absolute()
@@ -472,6 +522,9 @@ impl Editor {
             );
         }
         for clip in &self.timeline.document.clips {
+            if !(first_layer..last_layer).contains(&clip.layer) {
+                continue;
+            }
             let clip_width = clip.length as f32 * zoom;
             let selected = self.timeline.selected == Some(clip.id);
             let edge = (clip_width / 3.0).min(6.0);
@@ -569,9 +622,7 @@ impl Editor {
         let viewport = div()
             .id("timeline-editor")
             .w_full()
-            .h(px(self.timeline_height
-                - HEADER
-                - theme.measures.scrollbar_track))
+            .h(px(viewport_height))
             .overflow_scroll()
             .track_scroll(&self.timeline_scroll)
             .track_focus(&self.edit_focus)
@@ -589,9 +640,6 @@ impl Editor {
                         return;
                     }
                     let layer = ((local.y - RULER) / ROW).floor() as usize;
-                    if layer >= editor.timeline.document.layers {
-                        return;
-                    }
                     let frame = ((local.x - LABEL) / editor.timeline.zoom).round() as u64;
                     editor.open_object_menu(event.position, (layer, frame), window, cx);
                     cx.stop_propagation();
