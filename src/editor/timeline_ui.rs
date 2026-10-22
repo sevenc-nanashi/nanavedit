@@ -8,6 +8,20 @@ const LABEL: f32 = 100.0;
 const RULER: f32 = 28.0;
 const ROW: f32 = 40.0;
 
+fn timeline_line(color: gpui::Hsla) -> impl IntoElement + gpui::Styled {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            // ScrollArea fades primitives at their centers; keep long lines' centers in view.
+            let visible = bounds.intersect(&window.content_mask().bounds);
+            if !visible.is_empty() {
+                window.paint_quad(gpui::fill(visible, color));
+            }
+        },
+    )
+    .absolute()
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum Edit {
     Move,
@@ -484,7 +498,7 @@ impl Editor {
                     .top_0()
                     .h(px(height))
                     .w(px(1.0))
-                    .bg(theme.colors.hairline)
+                    .child(timeline_line(theme.colors.hairline).size_full())
                     .child(
                         div()
                             .pl_1()
@@ -503,8 +517,12 @@ impl Editor {
                     .top(px(RULER + layer as f32 * ROW))
                     .w(px(width))
                     .h(px(ROW))
-                    .border_b_1()
-                    .border_color(theme.colors.hairline)
+                    .child(
+                        timeline_line(theme.colors.hairline)
+                            .bottom_0()
+                            .w_full()
+                            .h(px(1.0)),
+                    )
                     .child(
                         div()
                             .w(px(LABEL))
@@ -612,7 +630,7 @@ impl Editor {
                 .top_0()
                 .w(px(2.0))
                 .h(px(height))
-                .bg(gpui::rgb(0xff6767)),
+                .child(timeline_line(gpui::rgb(0xff6767).into()).size_full()),
         );
         let selected = self
             .timeline
