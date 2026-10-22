@@ -1,4 +1,4 @@
-use crate::effects::{EffectDefinition, EffectInstance, EffectRole, Initialization, Resource};
+use crate::effects::{EffectDefinition, EffectInstance, EffectRole};
 use crate::timeline::Timeline;
 use effects_ui::CreationTarget;
 use gpui::{
@@ -200,17 +200,20 @@ impl Editor {
     }
 
     #[cfg(target_os = "windows")]
-    fn open_image(
+    fn open_file_parameter(
         &mut self,
-        definition: &'static EffectDefinition,
-        target: CreationTarget,
+        clip_id: u64,
+        effect_id: u64,
+        definition: &'static crate::effects::ParamDefinition,
         cx: &mut Context<Self>,
     ) {
         if self.loading || self.gpu_failed {
             return;
         }
         self.finish_clip_drag(false, cx);
+        self.finish_effect_edit(false, cx);
         self.timeline.playing = None;
+        let kind = definition.file.expect("file parameter has a kind");
         let limit = self
             .preview
             .as_ref()
@@ -220,7 +223,9 @@ impl Editor {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("PNG / JPEG画像を開く".into()),
+            prompt: Some(match kind {
+                crate::effects::FileKind::Image => "PNG / JPEG画像を開く".into(),
+            }),
         });
         self.loading = true;
         cx.notify();
@@ -236,7 +241,12 @@ impl Editor {
                     .ok_or_else(|| anyhow::anyhow!("画像が選択されていません"))?;
                 executor
                     .spawn(async move {
-                        crate::preview::load_image(&path, limit).map(|image| Some((path, image)))
+                        match kind {
+                            crate::effects::FileKind::Image => {
+                                crate::preview::load_image(&path, limit)
+                                    .map(|image| Some((path, image)))
+                            }
+                        }
                     })
                     .await
             }
@@ -265,11 +275,29 @@ impl Editor {
                                 .register_image(id, image)
                             {
                                 Ok(()) => {
-                                    editor.insert_effect(
-                                        definition,
-                                        target,
-                                        vec![Resource::Image(Rc::new(asset))],
-                                    );
+                                    let before = editor.timeline.document.clone();
+                                    let effect = editor
+                                        .timeline
+                                        .document
+                                        .clips
+                                        .iter_mut()
+                                        .find(|clip| clip.id == clip_id)
+                                        .expect("file target exists while editing is disabled")
+                                        .instance_mut(effect_id);
+                                    effect
+                                        .params
+                                        .iter_mut()
+                                        .find(|param| param.id == definition.id)
+                                        .expect("file parameter is declared")
+                                        .value = crate::effects::ParamValue::File(Some(
+                                        std::sync::Arc::new(crate::effects::FileAsset {
+                                            path,
+                                            resource: crate::effects::Resource::Image(
+                                                std::sync::Arc::new(asset),
+                                            ),
+                                        }),
+                                    ));
+                                    editor.timeline.commit(before);
                                     editor.sync_timeline();
                                     editor.preview_error = None;
                                 }

@@ -148,9 +148,9 @@ impl Editor {
             .map(|definition| {
                 gpui_kit::prelude::MenuItem::command(
                     format!("input:{}", definition.info.id),
-                    format!("{}オブジェクトを追加", definition.info.name),
+                    format!("{}を追加", definition.info.name),
                 )
-                .disabled(!self.can_initialize(definition))
+                .disabled(self.loading)
             })
             .collect();
         items.extend([
@@ -190,7 +190,6 @@ impl Editor {
                     let settings = EffectInstance::new(
                         self.timeline.allocate_id(),
                         crate::effects::definition("builtin.camera"),
-                        Vec::new(),
                     );
                     self.timeline
                         .add_object(ObjectKind::Camera { settings }, layer, frame);

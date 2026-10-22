@@ -10,6 +10,7 @@ pub(super) fn definition() -> EffectDefinition {
                 id: "opacity",
                 name: "不透明度",
                 default: ParamValue::Integer(100),
+                file: None,
                 choices: &[],
                 group: None,
                 number: Some(NumberDefinition {
@@ -20,7 +21,7 @@ pub(super) fn definition() -> EffectDefinition {
                     unit: "%",
                 }),
             }],
-            initialization: Initialization::Defaults,
+
             time_dependent: false,
         },
         #[cfg(target_os = "windows")]

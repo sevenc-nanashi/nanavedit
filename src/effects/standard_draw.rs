@@ -19,6 +19,7 @@ pub(super) const fn number(
             precision,
             unit: "",
         }),
+        file: None,
         choices: &[],
         group: Some(group),
     }
@@ -49,6 +50,7 @@ pub(super) fn definition() -> EffectDefinition {
                         name: "合成モード",
                         default: ParamValue::Choice("normal"),
                         number: None,
+                        file: None,
                         choices: &[("normal", "通常")],
                         group: Some("描画"),
                     },
@@ -57,12 +59,13 @@ pub(super) fn definition() -> EffectDefinition {
                         name: "カメラ制御の対象",
                         default: ParamValue::Bool(true),
                         number: None,
+                        file: None,
                         choices: &[],
                         group: Some("描画"),
                     },
                 ]
             },
-            initialization: Initialization::Defaults,
+
             time_dependent: false,
         },
         #[cfg(target_os = "windows")]

@@ -39,7 +39,9 @@ pub struct Clip {
 impl Clip {
     pub fn image(&self) -> Option<&ImageAsset> {
         match &self.kind {
-            ObjectKind::Input { input, .. } => input.resources.first().map(|r| r.image()),
+            ObjectKind::Input { input, .. } => {
+                input.files().next().map(|file| file.resource.image())
+            }
             _ => None,
         }
     }
@@ -271,8 +273,8 @@ impl Timeline {
                     .clips
                     .iter()
                     .flat_map(Clip::instances)
-                    .flat_map(|effect| &effect.resources)
-                    .map(|r| r.image().id)
+                    .flat_map(EffectInstance::files)
+                    .map(|file| file.resource.image().id)
             })
             .collect()
     }

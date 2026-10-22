@@ -31,11 +31,13 @@ gpui-box関連の依存は同じ`v0.2.0`に固定しています。
 ## タイムライン
 
 30fps固定で、下へスクロールすると空のレイヤーが続けて表示されます。トラック領域を右クリックして、
-画像（PNG／JPEG）・フィルタ・エフェクト・カメラ制御の各オブジェクトを追加します。
+画像ファイル・フィルタ・エフェクト・カメラ制御の各オブジェクトを追加します。
 右クリックしたレイヤー・フレーム以降で5秒分の空きがある最初の位置に追加します。
 メニューを開くだけでは選択・再生位置・履歴は変わりません。
-画像選択の間も追加先を保持し、キャンセル・失敗では追加しません。
 追加したクリップを選択し、その開始位置へシークします。
+画像ファイルオブジェクトは未選択で配置し、設定パネルの「ファイル」からPNG／JPEGを選択します。
+未選択時は透明で、タイムラインには種類名、選択後はファイル名を表示します。
+「変更…」で別の画像を選べます。オブジェクト追加とファイル設定はそれぞれ別のUndo操作です。
 
 - クリップ本体をドラッグして時間位置・レイヤーを変更し、左右端で長さを変更します。
 - 空レイヤーへの配置・移動ができます。ドラッグ中は上下端で自動スクロールします。移動は1回のUndoにまとまり、Escapeで取り消せます。
@@ -126,14 +128,15 @@ AviUtl2 2.1.14の別プロジェクトで、通常投影距離1024、中心の�
 エディターや評価ループに種類IDの分岐を追加する必要はありません。
 既存の実装は `image.rs`（画像入力）、`opacity.rs`（描画属性）、`invert.rs`（GPU画像処理）を参照してください。
 
-- `EffectInfo`：種類ID、表示名、入力／通常処理／出力設定／カメラ、パラメーター定義、初期化方法、時間依存の有無。
-- `EffectInstance`：配置ID、種類ID、設定値、有効状態、画像リソース参照。Undo／Redoではこのデータを複製します。
+- `EffectInfo`：種類ID、表示名、入力／通常処理／出力設定／カメラ、パラメーター定義、時間依存の有無。
+- `EffectInstance`：配置ID、種類ID、設定値、有効状態。Undo／Redoではこのデータを複製し、ファイルのリソースは共有します。
 - `EffectProcessor`：種類ごとに遅延生成して共有する処理。パイプラインなどを保持でき、配置固有の設定値は `params` から受け取ります。
 - `RenderParams`：不透明度・位置・中心・回転・拡大率・合成モード・カメラ対象の描画属性。
 - `CameraParams`：共通の設定値から別途評価するカメラ属性。カメラは画像処理用のprocessorを持ちません。
 
-設定値は `Integer(i32)`・`Float(f32)`・`Bool(bool)`・`Choice(&'static str)` です。
-数値はSliderとNumberInput、真偽値はCheckbox、選択肢はSelectになります。
+設定値は `Integer(i32)`・`Float(f32)`・`Bool(bool)`・`Choice(&'static str)`・`File(Option<Arc<FileAsset>>)` です。
+数値はSliderとNumberInput、真偽値はCheckbox、選択肢はSelect、ファイルはパス表示と選択・変更ボタンになります。
+`FileAsset` はパスと読み込み済みリソースを保持します。`ParamValue` は `Clone` で複製し、GPU画像は複製しません。
 `choices`で選択肢のIDと表示名、`group`で設定UIの見出しを指定します。
 数値定義には範囲、刻み、表示桁数、単位を指定します。整数の範囲はSliderで正確に表せる±16,777,216以内です。
 種類ID・パラメーターIDの重複、型と範囲の不整合、範囲外の既定値は起動時にエラーにします。
@@ -155,7 +158,7 @@ pub(super) fn definition() -> EffectDefinition {
                     id: "gain",
                     name: "倍率",
                     default: ParamValue::Float(1.0),
-                    choices: &[], group: None,
+                    choices: &[], group: None, file: None,
                     number: Some(NumberDefinition {
                         min: 0.0, max: 1.0, step: 0.01,
                         precision: 2, unit: "倍",
@@ -164,10 +167,9 @@ pub(super) fn definition() -> EffectDefinition {
                 ParamDefinition {
                     id: "bypass", name: "処理を省略",
                     default: ParamValue::Bool(false), number: None,
-                    choices: &[], group: None,
+                    choices: &[], group: None, file: None,
                 },
             ],
-            initialization: Initialization::Defaults,
             time_dependent: false,
         },
         #[cfg(target_os = "windows")]
@@ -196,10 +198,14 @@ impl EffectProcessor for Gain {
 ```
 
 入力は `role: EffectRole::Input` とし、`source: None` で呼ばれます。
-`Initialization::Defaults` は既定値だけで追加し、`ImageFile` は既存のPNG／JPEG選択・読み込みを行って
-`context.bindings` に画像参照を渡します。キャンセル・失敗では配置を作りません。
-読み込み済み画像は `context.image(0)?` で取得できます。入力のパラメーターも同じ設定UIで編集できます。
-履歴の画像保持は、入力と通常エフェクトのすべてのリソース参照を収集します。
+すべての種類をパラメーターの既定値で追加します。ファイルパラメーターは
+`default: ParamValue::File(None)`、`file: Some(FileKind::Image)`、`number: None`、`choices: &[]` と定義します。
+今回は画像用途のみ対応し、入力・通常エフェクトともに共通の設定UIから選択できます。
+読み込みとGPU登録に成功したときだけ値と履歴を更新し、キャンセル・失敗では現在の値を保ちます。
+画像処理では `param(params, "file")` の `File(Some(file))` から `context.image(&file)?` を呼び出します。
+画像ファイルオブジェクトの未選択状態は `context.transparent_image()?` で1×1の透明画像を返します。
+履歴の画像保持は、現在の配置とUndo／Redo内の全ファイルパラメーターを走査します。
+画像の変更をUndo／Redoしてもディスクから読み直しません。
 
 `ProcessContext` はローカル／シーンのフレーム、fps、ローカル時刻、オブジェクト／エフェクトID、
 レイヤー、画面寸法とGPU操作を提供します。時間で結果が変わる処理は `time_dependent: true` を指定します。
@@ -242,7 +248,9 @@ GPU初期化・描画の失敗は画面に表示し、ソフトウェア描画�
 gpui-box v0.2.0では埋め込みホストが編集画面の背面へ配置されるため、
 Windows側でホストの重なり順を補正しています。上流の修正後に取り除く予定です。
 
-macOS／Linuxでは編集画面を表示し、画像読み込み・プレビュー未対応を明示します。
+macOS／Linuxでも未選択の画像ファイルオブジェクトは追加できます。
+ファイルの選択ボタンは無効化し、画像読み込み・プレビュー未対応を明示します。
+パスの直接入力、ファイル変更の監視、動画・音声ファイルの読み込みには対応していません。
 
 ## 整形・検証
 
@@ -259,6 +267,10 @@ Windowsで画像追加、クリップ移動・長さ変更、同一レイヤー�
 透過画像の重ね合わせ、シーク・フレーム送り、再生終了、空白区間の黒表示、
 ズーム後のシーク座標とスクロールを確認しています。
 macOS/Linuxでの実機動作、表示倍率100%／150%の比較、GPU喪失からの動作は未検証です。
+
+ファイルパラメーターはWindowsで未選択の追加、PNGの設定・別画像への変更、
+未選択状態へのUndoとRedo、キャンセル後のRedo履歴保持、破損PNGでの画像・履歴保持を確認しています。
+今回の変更後のJPEG読み込みと、未選択画像に対するカメラ・フィルタの組み合わせは未検証です。
 
 エフェクト基盤はWindowsで登録定義からの追加メニュー、画像入力、色反転の連続適用、
 不透明度のドラッグとUndo／Redoを手動確認しています。

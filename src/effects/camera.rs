@@ -28,12 +28,13 @@ pub(super) fn definition() -> EffectDefinition {
                             precision: 0,
                             unit: "",
                         }),
+                        file: None,
                         choices: &[],
                         group: Some("適用範囲"),
                     },
                 ]
             },
-            initialization: Initialization::Defaults,
+
             time_dependent: false,
         },
         #[cfg(target_os = "windows")]

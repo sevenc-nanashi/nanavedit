@@ -1,6 +1,6 @@
 use super::*;
 use crate::effects::camera::CameraParams;
-use crate::effects::{EffectInstance, Param, Resource};
+use crate::effects::{EffectInstance, FileAsset, Param};
 use crate::timeline::ObjectKind;
 use wgpu::util::DeviceExt;
 #[path = "transform.rs"]
@@ -55,7 +55,6 @@ pub trait EffectProcessor {
 pub struct ProcessContext<'a> {
     resources: &'a mut GpuResources,
     pub encoder: &'a mut wgpu::CommandEncoder,
-    pub bindings: &'a [Resource],
     pub object_id: u64,
     pub effect_id: u64,
     pub layer: usize,
@@ -77,12 +76,8 @@ impl ProcessContext<'_> {
         self.frame as f64 / self.fps as f64
     }
 
-    pub fn image(&self, index: usize) -> Result<Source> {
-        let asset = self
-            .bindings
-            .get(index)
-            .context("画像リソースが指定されていません")?
-            .image();
+    pub fn image(&self, file: &FileAsset) -> Result<Source> {
+        let asset = file.resource.image();
         let source = self
             .resources
             .images
@@ -104,6 +99,26 @@ impl ProcessContext<'_> {
     }
     pub fn release(&mut self, source: Source) {
         self.resources.release(source);
+    }
+
+    pub fn transparent_image(&mut self) -> Result<Source> {
+        let source = self.acquire(1, 1)?;
+        {
+            let _clear = self.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("empty image input"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &source.view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+        }
+        Ok(source)
     }
 
     pub fn create_pipeline(&self, label: &str, fragment: &str) -> Result<wgpu::RenderPipeline> {
@@ -605,7 +620,6 @@ impl Gpu {
         let mut context = ProcessContext {
             resources: &mut self.resources,
             encoder,
-            bindings: &effect.resources,
             object_id: evaluation.object.id,
             effect_id: effect.id,
             layer: evaluation.object.layer,

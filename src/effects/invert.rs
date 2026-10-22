@@ -7,7 +7,7 @@ pub(super) fn definition() -> EffectDefinition {
             name: "色反転",
             role: EffectRole::Effect,
             param_definitions: &[],
-            initialization: Initialization::Defaults,
+
             time_dependent: false,
         },
         #[cfg(target_os = "windows")]

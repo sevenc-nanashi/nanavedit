@@ -20,47 +20,20 @@ enum EffectCommand {
 }
 
 impl Editor {
-    pub(super) fn can_initialize(&self, definition: &EffectDefinition) -> bool {
-        if self.loading {
-            return false;
-        }
-        match definition.info.initialization {
-            Initialization::Defaults => true,
-            Initialization::ImageFile => {
-                #[cfg(target_os = "windows")]
-                {
-                    !self.gpu_failed
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    false
-                }
-            }
-        }
-    }
-
     pub(super) fn start_effect_creation(
         &mut self,
         definition: &'static EffectDefinition,
         target: CreationTarget,
         cx: &mut Context<Self>,
     ) {
-        if !self.can_initialize(definition) {
+        if self.loading {
             return;
         }
         self.finish_clip_drag(false, cx);
         self.finish_effect_edit(false, cx);
         self.timeline.playing = None;
-        match definition.info.initialization {
-            Initialization::Defaults => {
-                self.insert_effect(definition, target, Vec::new());
-                self.sync_timeline();
-            }
-            Initialization::ImageFile => {
-                #[cfg(target_os = "windows")]
-                self.open_image(definition, target, cx);
-            }
-        }
+        self.insert_effect(definition, target);
+        self.sync_timeline();
         cx.notify();
     }
 
@@ -68,15 +41,13 @@ impl Editor {
         &mut self,
         definition: &'static EffectDefinition,
         target: CreationTarget,
-        resources: Vec<Resource>,
     ) {
-        let instance = EffectInstance::new(self.timeline.allocate_id(), definition, resources);
+        let instance = EffectInstance::new(self.timeline.allocate_id(), definition);
         match target {
             CreationTarget::Input { layer, frame } => {
                 let output = EffectInstance::new(
                     self.timeline.allocate_id(),
                     crate::effects::definition("builtin.standard_draw"),
-                    Vec::new(),
                 );
                 self.timeline.add_object(
                     ObjectKind::Input {
@@ -113,8 +84,7 @@ impl Editor {
             .iter()
             .filter(|d| d.info.role == EffectRole::Effect)
             .map(|d| {
-                gpui_kit::prelude::MenuItem::command(d.info.id, d.info.name)
-                    .disabled(!self.can_initialize(d))
+                gpui_kit::prelude::MenuItem::command(d.info.id, d.info.name).disabled(self.loading)
             })
             .collect();
         let position = self.effect_menu_bounds.get().bottom_left();
@@ -154,13 +124,17 @@ impl Editor {
             .find(|c| c.id == clip_id)
             .expect("edited object exists")
             .instance_mut(effect_id);
+        let immediate = matches!(
+            value,
+            ParamValue::Bool(_) | ParamValue::Choice(_) | ParamValue::File(_)
+        );
         effect
             .params
             .iter_mut()
             .find(|p| p.id == definition.id)
             .expect("edited parameter exists")
             .value = value;
-        if matches!(value, ParamValue::Bool(_) | ParamValue::Choice(_)) {
+        if immediate {
             self.finish_effect_edit(false, cx);
         }
         cx.notify();
@@ -181,6 +155,43 @@ impl Editor {
         let entity = cx.entity().downgrade();
         let disabled = self.loading || !effect.enabled;
         let control = match value {
+            ParamValue::File(file) => {
+                #[cfg(target_os = "windows")]
+                let unavailable = self.gpu_failed;
+                #[cfg(not(target_os = "windows"))]
+                let unavailable = true;
+                let control = div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(definition.name)
+                    .child(div().overflow_hidden().child(match &file {
+                        Some(file) => file.path.display().to_string(),
+                        None => "未選択".to_owned(),
+                    }))
+                    .child(
+                        Button::new(id)
+                            .label(if file.is_some() {
+                                "変更…"
+                            } else {
+                                "選択…"
+                            })
+                            .secondary()
+                            .control_size(ControlSize::Sm)
+                            .disabled(disabled || unavailable)
+                            .on_click(move |_, cx| {
+                                #[cfg(target_os = "windows")]
+                                let _ = entity.update(cx, |editor, cx| {
+                                    editor.open_file_parameter(clip_id, effect_id, definition, cx);
+                                });
+                                #[cfg(not(target_os = "windows"))]
+                                let _ = cx;
+                            }),
+                    );
+                #[cfg(not(target_os = "windows"))]
+                let control = control.child("ファイル読み込みは現在Windowsのみ対応しています");
+                control.into_any_element()
+            }
             ParamValue::Bool(value) => Checkbox::new(id)
                 .label(definition.name)
                 .checked(value)

@@ -1,5 +1,9 @@
 use crate::timeline::ImageAsset;
-use std::{collections::HashSet, rc::Rc, sync::LazyLock};
+use std::{
+    collections::HashSet,
+    path::PathBuf,
+    sync::{Arc, LazyLock},
+};
 
 pub mod camera;
 mod image;
@@ -10,20 +14,21 @@ mod standard_draw;
 #[cfg(target_os = "windows")]
 pub use crate::preview::effects::{EffectProcessor, ProcessContext, RenderParams, Source};
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ParamValue {
     Integer(i32),
     Float(f32),
     Bool(bool),
     Choice(&'static str),
+    File(Option<Arc<FileAsset>>),
 }
 
 impl ParamValue {
-    pub fn number(self) -> f32 {
+    pub fn number(&self) -> f32 {
         match self {
-            Self::Integer(value) => value as f32,
-            Self::Float(value) => value,
-            Self::Bool(_) | Self::Choice(_) => panic!("parameter is not numeric"),
+            Self::Integer(value) => *value as f32,
+            Self::Float(value) => *value,
+            _ => panic!("parameter is not numeric"),
         }
     }
 }
@@ -43,6 +48,7 @@ pub struct ParamDefinition {
     pub name: &'static str,
     pub default: ParamValue,
     pub number: Option<NumberDefinition>,
+    pub file: Option<FileKind>,
     pub choices: &'static [(&'static str, &'static str)],
     pub group: Option<&'static str>,
 }
@@ -72,6 +78,7 @@ pub fn param(params: &[Param], id: &str) -> ParamValue {
         .find(|p| p.id == id)
         .expect("parameter is declared by the effect")
         .value
+        .clone()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,9 +90,8 @@ pub enum EffectRole {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Initialization {
-    Defaults,
-    ImageFile,
+pub enum FileKind {
+    Image,
 }
 
 #[derive(Debug)]
@@ -94,7 +100,6 @@ pub struct EffectInfo {
     pub name: &'static str,
     pub role: EffectRole,
     pub param_definitions: &'static [ParamDefinition],
-    pub initialization: Initialization,
     pub time_dependent: bool,
 }
 
@@ -109,7 +114,13 @@ pub type ProcessorFactory = fn(&ProcessContext<'_>) -> anyhow::Result<Box<dyn Ef
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Resource {
-    Image(Rc<ImageAsset>),
+    Image(Arc<ImageAsset>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileAsset {
+    pub path: PathBuf,
+    pub resource: Resource,
 }
 
 impl Resource {
@@ -126,11 +137,10 @@ pub struct EffectInstance {
     pub type_id: &'static str,
     pub params: Vec<Param>,
     pub enabled: bool,
-    pub resources: Vec<Resource>,
 }
 
 impl EffectInstance {
-    pub fn new(id: u64, definition: &'static EffectDefinition, resources: Vec<Resource>) -> Self {
+    pub fn new(id: u64, definition: &'static EffectDefinition) -> Self {
         Self {
             id,
             type_id: definition.info.id,
@@ -140,16 +150,22 @@ impl EffectInstance {
                 .iter()
                 .map(|p| Param {
                     id: p.id,
-                    value: p.default,
+                    value: p.default.clone(),
                 })
                 .collect(),
             enabled: true,
-            resources,
         }
     }
 
     pub fn definition(&self) -> &'static EffectDefinition {
         definition(self.type_id)
+    }
+
+    pub fn files(&self) -> impl Iterator<Item = &FileAsset> {
+        self.params.iter().filter_map(|param| match &param.value {
+            ParamValue::File(Some(file)) => Some(file.as_ref()),
+            _ => None,
+        })
     }
 }
 
@@ -178,6 +194,11 @@ pub fn definitions() -> &'static [EffectDefinition] {
             );
             let mut param_ids = HashSet::new();
             for param in info.param_definitions {
+                assert_eq!(
+                    matches!(param.default, ParamValue::File(_)),
+                    param.file.is_some(),
+                    "file parameters require a file kind"
+                );
                 assert!(
                     matches!(param.default, ParamValue::Choice(_)) || param.choices.is_empty(),
                     "choices require a choice parameter"
@@ -188,8 +209,9 @@ pub fn definitions() -> &'static [EffectDefinition] {
                     info.id,
                     param.id
                 );
-                match (param.default, param.number) {
+                match (&param.default, param.number) {
                     (ParamValue::Bool(_), None) => {}
+                    (ParamValue::File(None), None) => {}
                     (ParamValue::Choice(value), None) => {
                         let mut choices = HashSet::new();
                         assert!(
