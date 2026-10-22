@@ -1,5 +1,7 @@
 @group(0) @binding(0) var picture: texture_2d<f32>;
 @group(0) @binding(1) var picture_sampler: sampler;
+// alpha, premultiplied input, invert RGB, padding
+@group(1) @binding(0) var<uniform> params: vec4<f32>;
 
 struct Vertex {
     @builtin(position) position: vec4<f32>,
@@ -15,5 +17,9 @@ fn vs_main(@builtin(vertex_index) index: u32) -> Vertex {
 @fragment
 fn fs_main(vertex: Vertex) -> @location(0) vec4<f32> {
     let color = textureSample(picture, picture_sampler, vertex.uv);
-    return vec4(color.rgb * color.a, color.a);
+    var rgb = select(color.rgb * color.a, color.rgb, params.y > 0.5);
+    if params.z > 0.5 {
+        rgb = vec3(color.a) - rgb;
+    }
+    return vec4(rgb, color.a) * params.x;
 }

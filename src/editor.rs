@@ -5,6 +5,7 @@ use gpui::{
 };
 use gpui_kit::prelude::{Button, ControlSize, Disableable, Sizable};
 use std::{cell::Cell, rc::Rc};
+mod effects_ui;
 mod timeline_ui;
 use gpui_kit::{
     semantics::{NodeSpec, Role, Semantic, SemanticCoordinator},
@@ -42,10 +43,15 @@ pub struct Editor {
     timeline_bounds: Rc<Cell<gpui::Bounds<gpui::Pixels>>>,
     clip_drag: Option<timeline_ui::Drag>,
     bad_drop: bool,
+    object_menu: gpui::Entity<gpui_kit::prelude::ContextMenu>,
+    addition_target: Option<(usize, u64)>,
+    effect_edit: Option<crate::timeline::Document>,
+    effect_cancelled: bool,
+    pointer_down: bool,
+    effect_drag: Option<u64>,
+    effects_focus: FocusHandle,
     #[cfg(target_os = "windows")]
     preview: Option<crate::preview::Preview>,
-    #[cfg(target_os = "windows")]
-    open_focus: FocusHandle,
     loading: bool,
     preview_error: Option<String>,
     #[cfg(target_os = "windows")]
@@ -57,6 +63,23 @@ impl Editor {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let edit_focus = cx.focus_handle().tab_stop(true).tab_index(3);
+        let effects_focus = cx.focus_handle();
+        cx.on_focus_out(&effects_focus, window, |editor, _, _, cx| {
+            editor.finish_effect_edit(false, cx);
+        })
+        .detach();
+        let object_menu = cx.new(|cx| {
+            gpui_kit::prelude::ContextMenu::new("object-menu", window, cx).name("オブジェクト追加")
+        });
+        cx.subscribe(&object_menu, |editor, _, event, cx| match event {
+            gpui_kit::prelude::ContextMenuEvent::Invoked(id) => editor.add_from_menu(id, cx),
+            gpui_kit::prelude::ContextMenuEvent::Unavailable(error) => {
+                editor.preview_error = Some(format!("メニューを表示できません: {error}"));
+                cx.notify();
+            }
+            _ => {}
+        })
+        .detach();
         cx.on_blur(&edit_focus, window, |editor, _, cx| {
             editor.finish_clip_drag(true, cx);
         })
@@ -64,6 +87,10 @@ impl Editor {
         cx.observe_window_activation(window, |editor, window, cx| {
             if !window.is_window_active() {
                 editor.finish_clip_drag(true, cx);
+                editor.finish_effect_edit(false, cx);
+                editor.pointer_down = false;
+                editor.effect_drag = None;
+                editor.effect_cancelled = false;
                 editor.drag = None;
             }
         })
@@ -114,10 +141,15 @@ impl Editor {
             timeline_bounds: Rc::new(Cell::new(gpui::Bounds::default())),
             clip_drag: None,
             bad_drop: false,
+            object_menu,
+            addition_target: None,
+            effect_edit: None,
+            effect_cancelled: false,
+            pointer_down: false,
+            effect_drag: None,
+            effects_focus,
             #[cfg(target_os = "windows")]
             preview,
-            #[cfg(target_os = "windows")]
-            open_focus: cx.focus_handle().tab_stop(true).tab_index(0),
             loading: false,
             preview_error,
             #[cfg(target_os = "windows")]
@@ -126,7 +158,7 @@ impl Editor {
     }
 
     #[cfg(target_os = "windows")]
-    fn open_image(&mut self, cx: &mut Context<Self>) {
+    fn open_image(&mut self, layer: usize, frame: u64, cx: &mut Context<Self>) {
         if self.loading || self.gpu_failed {
             return;
         }
@@ -186,7 +218,16 @@ impl Editor {
                                 .register_image(id, image)
                             {
                                 Ok(()) => {
-                                    editor.timeline.add_image(asset);
+                                    editor.timeline.add_object(
+                                        crate::timeline::ObjectKind::Input {
+                                            input: crate::timeline::InputSource::Image(Rc::new(
+                                                asset,
+                                            )),
+                                            output: crate::timeline::OutputDestination::Canvas,
+                                        },
+                                        layer,
+                                        frame,
+                                    );
                                     editor.sync_timeline();
                                     editor.preview_error = None;
                                 }
@@ -209,40 +250,13 @@ impl Editor {
         .detach();
     }
 
-    fn preview_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let header = div()
+    fn preview_header(&self) -> impl IntoElement {
+        div()
             .flex()
             .w_full()
-            .items_center()
             .justify_between()
-            .child("プレビュー");
-        #[cfg(target_os = "windows")]
-        {
-            let entity = cx.entity().downgrade();
-            header.child(
-                Button::new("open-image")
-                    .track_focus(&self.open_focus)
-                    .control_size(ControlSize::Sm)
-                    .secondary()
-                    .disabled(self.loading || self.gpu_failed)
-                    .label(if self.loading {
-                        "読み込み中…"
-                    } else {
-                        "画像を追加"
-                    })
-                    .on_click(move |window, cx| {
-                        let _ = entity.update(cx, |editor, cx| {
-                            editor.open_focus.focus(window, cx);
-                            editor.open_image(cx);
-                        });
-                    }),
-            )
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = cx;
-            header
-        }
+            .child("プレビュー")
+            .when(self.loading, |header| header.child("読み込み中…"))
     }
 
     fn preview_content(&self, frame_width: f32, theme: &Theme) -> impl IntoElement {
@@ -469,6 +483,12 @@ impl Render for Editor {
             .text_color(theme.colors.text)
             .font_family(UI_FONT)
             .text_size(px(13.0))
+            .capture_any_mouse_down(cx.listener(|editor, event: &gpui::MouseDownEvent, _, cx| {
+                editor.finish_effect_edit(false, cx);
+                editor.pointer_down = event.button == MouseButton::Left;
+                editor.effect_drag = None;
+                editor.effect_cancelled = false;
+            }))
             .on_key_down(|event, window, cx| {
                 if event.keystroke.key == "tab" {
                     if event.keystroke.modifiers.shift {
@@ -482,6 +502,12 @@ impl Render for Editor {
             .on_mouse_move(
                 cx.listener(|editor, event: &gpui::MouseMoveEvent, window, cx| {
                     editor.move_clip_drag(event, cx);
+                    if event.pressed_button != Some(MouseButton::Left) {
+                        editor.finish_effect_edit(false, cx);
+                        editor.pointer_down = false;
+                        editor.effect_drag = None;
+                        editor.effect_cancelled = false;
+                    }
                     if let Some((panel, previous)) = editor.drag {
                         if event.pressed_button != Some(MouseButton::Left) {
                             editor.drag = None;
@@ -501,6 +527,10 @@ impl Render for Editor {
                 cx.listener(|editor, _, _, cx| {
                     editor.drag = None;
                     editor.finish_clip_drag(false, cx);
+                    editor.finish_effect_edit(false, cx);
+                    editor.effect_cancelled = false;
+                    editor.pointer_down = false;
+                    editor.effect_drag = None;
                 }),
             )
             .on_mouse_up_out(
@@ -508,6 +538,10 @@ impl Render for Editor {
                 cx.listener(|editor, _, _, cx| {
                     editor.drag = None;
                     editor.finish_clip_drag(false, cx);
+                    editor.finish_effect_edit(false, cx);
+                    editor.effect_cancelled = false;
+                    editor.pointer_down = false;
+                    editor.effect_drag = None;
                 }),
             )
             .child(
@@ -518,7 +552,7 @@ impl Render for Editor {
                     .flex_none()
                     .child(
                         div().w(px(preview_width)).h_full().flex_none().child(
-                            panel(self.preview_header(cx), &theme)
+                            panel(self.preview_header(), &theme)
                                 .child(self.preview_content(frame_width, &theme)),
                         ),
                     )
@@ -528,9 +562,10 @@ impl Render for Editor {
                             .w(px(self.settings_width))
                             .h_full()
                             .flex_none()
-                            .child(panel("設定", &theme).child(self.selection_details(&theme))),
+                            .child(panel("設定", &theme).child(self.selection_details(&theme, cx))),
                     ),
             )
+            .child(self.object_menu.clone())
             .child(self.divider(Panel::Timeline, cx))
             .child(
                 div()

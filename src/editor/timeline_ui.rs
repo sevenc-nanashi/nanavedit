@@ -1,5 +1,5 @@
 use super::*;
-use crate::timeline::{Clip, Document, FPS};
+use crate::timeline::{Clip, Document, FPS, ObjectKind};
 use gpui::{Bounds, Pixels, canvas, point};
 use gpui_kit::prelude::ScrollArea;
 
@@ -41,7 +41,7 @@ impl Editor {
         if !self.gpu_failed
             && let Some(preview) = &self.preview
         {
-            preview.set_images(self.timeline.active_images());
+            preview.set_objects(self.timeline.active_objects(), self.timeline.frame);
         }
     }
 
@@ -58,6 +58,7 @@ impl Editor {
             return;
         }
         self.finish_clip_drag(false, cx);
+        self.finish_effect_edit(false, cx);
         if !matches!(command, Command::Play) {
             self.timeline.playing = None;
         }
@@ -113,6 +114,70 @@ impl Editor {
         )
     }
 
+    fn open_object_menu(
+        &mut self,
+        position: Point<Pixels>,
+        target: (usize, u64),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.loading {
+            return;
+        }
+        self.finish_clip_drag(false, cx);
+        self.finish_effect_edit(false, cx);
+        self.timeline.playing = None;
+        self.addition_target = Some(target);
+        let image_disabled = {
+            #[cfg(target_os = "windows")]
+            {
+                self.gpu_failed
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                true
+            }
+        };
+        let result = self.object_menu.update(cx, |menu, cx| {
+            menu.set_items(
+                vec![
+                    gpui_kit::prelude::MenuItem::command("image", "画像オブジェクトを追加")
+                        .disabled(image_disabled),
+                    gpui_kit::prelude::MenuItem::command("filter", "フィルタオブジェクトを追加"),
+                    gpui_kit::prelude::MenuItem::command("effect", "エフェクトオブジェクトを追加"),
+                ],
+                window,
+                cx,
+            )?;
+            menu.open_at(position, window, cx)
+        });
+        if let Err(error) = result {
+            self.preview_error = Some(format!("メニューを表示できません: {error}"));
+        }
+        cx.notify();
+    }
+
+    pub(super) fn add_from_menu(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        let (layer, frame) = self
+            .addition_target
+            .take()
+            .expect("menu has an insertion target");
+        match id {
+            "image" => {
+                #[cfg(target_os = "windows")]
+                self.open_image(layer, frame, cx);
+            }
+            "filter" => self.timeline.add_object(ObjectKind::Filter, layer, frame),
+            "effect" => self.timeline.add_object(ObjectKind::Effect, layer, frame),
+            _ => unreachable!("known object menu command"),
+        }
+        self.sync_timeline();
+        cx.notify();
+    }
+
     fn seek(&mut self, x: f32) {
         self.timeline.playing = None;
         self.timeline.frame = ((x - LABEL) / self.timeline.zoom).round().max(0.0) as u64;
@@ -128,6 +193,7 @@ impl Editor {
             return;
         }
         self.edit_focus.focus(window, cx);
+        self.finish_effect_edit(false, cx);
         self.timeline.playing = None;
         let position = self.local_position(event.position);
         if position.y < RULER {
@@ -222,27 +288,6 @@ impl Editor {
             }
         }
         cx.notify();
-    }
-
-    pub(super) fn selection_details(&self, theme: &Theme) -> Div {
-        let Some(clip) = self.timeline.selected_clip() else {
-            return empty_message("オブジェクトが選択されていません", theme);
-        };
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .p_4()
-            .overflow_hidden()
-            .child(clip.image.name.clone())
-            .child(format!("{} × {} px", clip.image.width, clip.image.height))
-            .child(format!("レイヤー {}", clip.layer + 1))
-            .child(format!("開始: {} フレーム", clip.start))
-            .child(format!(
-                "長さ: {} フレーム（{:.2}秒）",
-                clip.length,
-                clip.length as f64 / FPS as f64
-            ))
     }
 
     pub(super) fn timeline_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -430,7 +475,14 @@ impl Editor {
                     .h(px(ROW - 6.0))
                     .overflow_hidden()
                     .rounded_sm()
-                    .bg(gpui::rgb(if selected { 0x315f88 } else { 0x304352 }))
+                    .bg(gpui::rgb(match (&clip.kind, selected) {
+                        (ObjectKind::Input { .. }, true) => 0x315f88,
+                        (ObjectKind::Input { .. }, false) => 0x304352,
+                        (ObjectKind::Filter, true) => 0x78612f,
+                        (ObjectKind::Filter, false) => 0x51452c,
+                        (ObjectKind::Effect, true) => 0x71528a,
+                        (ObjectKind::Effect, false) => 0x4d3e5b,
+                    }))
                     .border_1()
                     .border_color(if selected {
                         theme.colors.focus
@@ -446,7 +498,7 @@ impl Editor {
                         div()
                             .px_2()
                             .whitespace_nowrap()
-                            .child(clip.image.name.clone()),
+                            .child(clip.name().to_owned()),
                     )
                     .child(
                         div()
@@ -479,7 +531,7 @@ impl Editor {
                         NodeSpec::new(format!("clip-{}", clip.id), Role::Row)
                             .text(format!(
                                 "{}、レイヤー{}、開始{}、長さ{}フレーム",
-                                clip.image.name,
+                                clip.name(),
                                 clip.layer + 1,
                                 clip.start,
                                 clip.length
@@ -500,7 +552,7 @@ impl Editor {
         let selected = self
             .timeline
             .selected_clip()
-            .map(|c| c.image.name.as_str())
+            .map(|c| c.name())
             .unwrap_or("なし");
         let viewport = div()
             .id("timeline-editor")
@@ -517,43 +569,71 @@ impl Editor {
                 CursorStyle::Arrow
             })
             .on_mouse_down(MouseButton::Left, cx.listener(Self::begin_clip_drag))
-            .on_key_down(cx.listener(|editor, event: &gpui::KeyDownEvent, _, cx| {
-                if editor.loading {
-                    return;
-                }
-                let key = event.keystroke.key.as_str();
-                if key == "escape" {
-                    editor.finish_clip_drag(true, cx);
-                } else if event.keystroke.modifiers.control && key == "z" {
-                    editor.command(
-                        if event.keystroke.modifiers.shift {
-                            Command::Redo
-                        } else {
-                            Command::Undo
-                        },
-                        cx,
-                    );
-                } else if event.keystroke.modifiers.control && key == "y" {
-                    editor.command(Command::Redo, cx);
-                } else if key == "space" {
-                    editor.command(Command::Play, cx);
-                } else if key == "delete" || key == "backspace" {
-                    editor.command(Command::Delete, cx);
-                } else {
-                    let frame = match key {
-                        "left" => editor.timeline.frame.saturating_sub(1),
-                        "right" => editor.timeline.frame.saturating_add(1),
-                        "home" => 0,
-                        "end" => editor.timeline.end().saturating_sub(1),
-                        _ => return,
-                    };
-                    editor.finish_clip_drag(false, cx);
-                    editor.timeline.playing = None;
-                    editor.timeline.frame = frame;
-                    cx.notify();
-                }
-                cx.stop_propagation();
-            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|editor, event: &gpui::MouseDownEvent, window, cx| {
+                    let local = editor.local_position(event.position);
+                    if local.x < LABEL || local.y < RULER {
+                        return;
+                    }
+                    let layer = ((local.y - RULER) / ROW).floor() as usize;
+                    if layer >= editor.timeline.document.layers {
+                        return;
+                    }
+                    let frame = ((local.x - LABEL) / editor.timeline.zoom).round() as u64;
+                    editor.open_object_menu(event.position, (layer, frame), window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_key_down(
+                cx.listener(|editor, event: &gpui::KeyDownEvent, window, cx| {
+                    if editor.loading {
+                        return;
+                    }
+                    let key = event.keystroke.key.as_str();
+                    if key == "f10" && event.keystroke.modifiers.shift {
+                        let bounds = editor.timeline_scroll.bounds();
+                        let position = bounds.origin + point(px(LABEL), px(RULER));
+                        editor.open_object_menu(
+                            position,
+                            (editor.timeline.layer, editor.timeline.frame),
+                            window,
+                            cx,
+                        );
+                        window.prevent_default();
+                    } else if key == "escape" {
+                        editor.finish_clip_drag(true, cx);
+                    } else if event.keystroke.modifiers.control && key == "z" {
+                        editor.command(
+                            if event.keystroke.modifiers.shift {
+                                Command::Redo
+                            } else {
+                                Command::Undo
+                            },
+                            cx,
+                        );
+                    } else if event.keystroke.modifiers.control && key == "y" {
+                        editor.command(Command::Redo, cx);
+                    } else if key == "space" {
+                        editor.command(Command::Play, cx);
+                    } else if key == "delete" || key == "backspace" {
+                        editor.command(Command::Delete, cx);
+                    } else {
+                        let frame = match key {
+                            "left" => editor.timeline.frame.saturating_sub(1),
+                            "right" => editor.timeline.frame.saturating_add(1),
+                            "home" => 0,
+                            "end" => editor.timeline.end().saturating_sub(1),
+                            _ => return,
+                        };
+                        editor.finish_clip_drag(false, cx);
+                        editor.timeline.playing = None;
+                        editor.timeline.frame = frame;
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                }),
+            )
             .child(content)
             .semantic_in(
                 cx,

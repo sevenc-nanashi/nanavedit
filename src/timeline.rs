@@ -13,15 +13,79 @@ pub struct ImageAsset {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EffectKind {
+    Opacity(u8),
+    Invert,
+}
+
+impl EffectKind {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Opacity(_) => "不透明度",
+            Self::Invert => "色反転",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Effect {
+    pub id: u64,
+    pub kind: EffectKind,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InputSource {
+    Image(Rc<ImageAsset>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OutputDestination {
+    Canvas,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ObjectKind {
+    Input {
+        input: InputSource,
+        output: OutputDestination,
+    },
+    Filter,
+    Effect,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Clip {
     pub id: u64,
-    pub image: Rc<ImageAsset>,
+    pub kind: ObjectKind,
+    pub effects: Vec<Effect>,
     pub layer: usize,
     pub start: u64,
     pub length: u64,
 }
 
 impl Clip {
+    pub fn image(&self) -> Option<&ImageAsset> {
+        match &self.kind {
+            ObjectKind::Input {
+                input: InputSource::Image(image),
+                ..
+            } => Some(image),
+            _ => None,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match &self.kind {
+            ObjectKind::Input {
+                input: InputSource::Image(image),
+                ..
+            } => &image.name,
+            ObjectKind::Filter => "フィルタオブジェクト",
+            ObjectKind::Effect => "エフェクトオブジェクト",
+        }
+    }
+
     pub fn end(&self) -> u64 {
         self.start + self.length
     }
@@ -117,14 +181,14 @@ impl Timeline {
         id
     }
 
-    pub fn add_image(&mut self, image: ImageAsset) {
+    pub fn add_object(&mut self, kind: ObjectKind, layer: usize, frame: u64) {
         let before = self.document.clone();
-        let mut start = self.frame;
+        let mut start = frame;
         let mut clips: Vec<_> = self
             .document
             .clips
             .iter()
-            .filter(|c| c.layer == self.layer)
+            .filter(|c| c.layer == layer)
             .collect();
         clips.sort_by_key(|c| c.start);
         for clip in clips {
@@ -135,15 +199,17 @@ impl Timeline {
                 start = clip.end();
             }
         }
-        let id = image.id;
+        let id = self.allocate_id();
         self.document.clips.push(Clip {
             id,
-            image: Rc::new(image),
-            layer: self.layer,
+            kind,
+            effects: Vec::new(),
+            layer,
             start,
             length: INITIAL_LENGTH,
         });
         self.selected = Some(id);
+        self.layer = layer;
         self.frame = start;
         self.commit(before);
     }
@@ -185,7 +251,7 @@ impl Timeline {
         true
     }
 
-    pub fn active_images(&self) -> Vec<u64> {
+    pub fn active_objects(&self) -> Vec<Clip> {
         let mut clips: Vec<_> = self
             .document
             .clips
@@ -193,14 +259,34 @@ impl Timeline {
             .filter(|c| c.start <= self.frame && self.frame < c.end())
             .collect();
         clips.sort_by_key(|c| c.layer);
-        clips.into_iter().map(|c| c.image.id).collect()
+        clips.into_iter().cloned().collect()
+    }
+
+    pub fn effect_target(&self, id: u64) -> Option<u64> {
+        let mut target = None;
+        for clip in self.active_objects() {
+            if clip.id == id {
+                return target;
+            }
+            match clip.kind {
+                ObjectKind::Input { .. } => target = Some(clip.id),
+                ObjectKind::Filter => target = None,
+                ObjectKind::Effect => {}
+            }
+        }
+        None
     }
 
     pub fn retained_images(&self) -> HashSet<u64> {
         std::iter::once(&self.document)
             .chain(&self.undo)
             .chain(&self.redo)
-            .flat_map(|document| document.clips.iter().map(|c| c.image.id))
+            .flat_map(|document| {
+                document
+                    .clips
+                    .iter()
+                    .filter_map(|c| c.image().map(|i| i.id))
+            })
             .collect()
     }
 

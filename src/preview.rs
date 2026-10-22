@@ -1,3 +1,6 @@
+mod effects;
+use crate::timeline::Clip;
+use effects::Source;
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
@@ -151,13 +154,15 @@ impl Preview {
         Ok(())
     }
 
-    pub fn set_images(&self, images: Vec<u64>) {
+    pub fn set_objects(&self, objects: Vec<Clip>, frame: u64) {
         let mut gpu = self.native.gpu.borrow_mut();
-        if let Some(gpu) = gpu.as_mut()
-            && gpu.visible != images
-        {
-            gpu.visible = images;
-            self.native.invalidate();
+        if let Some(gpu) = gpu.as_mut() {
+            gpu.frame = frame;
+            // The current built-ins are static; time alone does not invalidate the image.
+            if gpu.visible != objects {
+                gpu.visible = objects;
+                self.native.invalidate();
+            }
         }
     }
 
@@ -314,8 +319,14 @@ struct Gpu {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
-    images: HashMap<u64, (wgpu::BindGroup, u32, u32)>,
-    visible: Vec<u64>,
+    images: HashMap<u64, Source>,
+    effect_pipeline: wgpu::RenderPipeline,
+    image_layout: wgpu::BindGroupLayout,
+    params_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    scratch: Vec<Source>,
+    visible: Vec<Clip>,
+    frame: u64,
 }
 
 impl Gpu {
@@ -382,30 +393,78 @@ impl Gpu {
             label: Some("preview"),
             source: wgpu::ShaderSource::Wgsl(include_str!("preview.wgsl").into()),
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("preview"),
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
+        let image_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("effect image"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let params_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("effect params"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(16),
+                },
+                count: None,
+            }],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("effects"),
+            bind_group_layouts: &[Some(&image_layout), Some(&params_layout)],
+            immediate_size: 0,
+        });
+        let make_pipeline = |format| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("preview effects"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pipeline = make_pipeline(format);
+        let effect_pipeline = make_pipeline(wgpu::TextureFormat::Rgba16Float);
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
         });
         // Zero marks the surface as unconfigured until GPUI allocates its physical size.
         config.width = 0;
@@ -416,8 +475,14 @@ impl Gpu {
             queue,
             config,
             pipeline,
+            effect_pipeline,
+            image_layout,
+            params_layout,
+            sampler,
+            scratch: Vec::new(),
             images: HashMap::new(),
             visible: Vec::new(),
+            frame: 0,
         })
     }
 
@@ -454,26 +519,8 @@ impl Gpu {
             size,
         );
         let view = texture.create_view(&Default::default());
-        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("preview image"),
-            layout: &self.pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-        });
-        self.images.insert(id, (bind_group, width, height));
+        let source = self.source(view, width, height, false);
+        self.images.insert(id, source);
         Ok(())
     }
 
@@ -509,40 +556,7 @@ impl Gpu {
         };
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("preview"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            for id in &self.visible {
-                let (image, image_width, image_height) =
-                    self.images.get(id).expect("visible image is registered");
-                let scale =
-                    (width as f32 / *image_width as f32).min(height as f32 / *image_height as f32);
-                let w = *image_width as f32 * scale;
-                let h = *image_height as f32 * scale;
-                pass.set_viewport(
-                    (width as f32 - w) / 2.0,
-                    (height as f32 - h) / 2.0,
-                    w,
-                    h,
-                    0.0,
-                    1.0,
-                );
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, image, &[]);
-                pass.draw(0..3, 0..1);
-            }
-        }
+        self.render_objects(&mut encoder, &view, width, height)?;
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
         drop(view);
