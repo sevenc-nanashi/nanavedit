@@ -128,27 +128,23 @@ impl Editor {
         self.finish_effect_edit(false, cx);
         self.timeline.playing = None;
         self.addition_target = Some(target);
-        let image_disabled = {
-            #[cfg(target_os = "windows")]
-            {
-                self.gpu_failed
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                true
-            }
-        };
+        let mut items: Vec<_> = crate::effects::definitions()
+            .iter()
+            .filter(|definition| definition.info.role == EffectRole::Input)
+            .map(|definition| {
+                gpui_kit::prelude::MenuItem::command(
+                    format!("input:{}", definition.info.id),
+                    format!("{}オブジェクトを追加", definition.info.name),
+                )
+                .disabled(!self.can_initialize(definition))
+            })
+            .collect();
+        items.extend([
+            gpui_kit::prelude::MenuItem::command("filter", "フィルタオブジェクトを追加"),
+            gpui_kit::prelude::MenuItem::command("effect", "エフェクトオブジェクトを追加"),
+        ]);
         let result = self.object_menu.update(cx, |menu, cx| {
-            menu.set_items(
-                vec![
-                    gpui_kit::prelude::MenuItem::command("image", "画像オブジェクトを追加")
-                        .disabled(image_disabled),
-                    gpui_kit::prelude::MenuItem::command("filter", "フィルタオブジェクトを追加"),
-                    gpui_kit::prelude::MenuItem::command("effect", "エフェクトオブジェクトを追加"),
-                ],
-                window,
-                cx,
-            )?;
+            menu.set_items(items, window, cx)?;
             menu.open_at(position, window, cx)
         });
         if let Err(error) = result {
@@ -165,14 +161,18 @@ impl Editor {
             .addition_target
             .take()
             .expect("menu has an insertion target");
-        match id {
-            "image" => {
-                #[cfg(target_os = "windows")]
-                self.open_image(layer, frame, cx);
+        if let Some(id) = id.strip_prefix("input:") {
+            self.start_effect_creation(
+                crate::effects::definition(id),
+                CreationTarget::Input { layer, frame },
+                cx,
+            );
+        } else {
+            match id {
+                "filter" => self.timeline.add_object(ObjectKind::Filter, layer, frame),
+                "effect" => self.timeline.add_object(ObjectKind::Effect, layer, frame),
+                _ => unreachable!("known object menu command"),
             }
-            "filter" => self.timeline.add_object(ObjectKind::Filter, layer, frame),
-            "effect" => self.timeline.add_object(ObjectKind::Effect, layer, frame),
-            _ => unreachable!("known object menu command"),
         }
         self.sync_timeline();
         cx.notify();

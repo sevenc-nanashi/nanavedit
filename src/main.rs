@@ -1,4 +1,5 @@
 mod editor;
+pub mod effects;
 #[cfg(target_os = "windows")]
 mod preview;
 mod timeline;
@@ -9,6 +10,7 @@ fn main() {
     gpui_platform::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(|cx| {
+            effects::definitions();
             gpui_kit::install(cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {

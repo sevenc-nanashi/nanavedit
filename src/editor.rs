@@ -1,4 +1,6 @@
+use crate::effects::{EffectDefinition, EffectInstance, EffectRole, Initialization, Resource};
 use crate::timeline::Timeline;
+use effects_ui::CreationTarget;
 use gpui::{
     Context, CursorStyle, Div, FocusHandle, IntoElement, MouseButton, Point, Render, Window, div,
     prelude::*, px,
@@ -45,10 +47,13 @@ pub struct Editor {
     bad_drop: bool,
     object_menu: gpui::Entity<gpui_kit::prelude::ContextMenu>,
     addition_target: Option<(usize, u64)>,
+    effect_menu: gpui::Entity<gpui_kit::prelude::ContextMenu>,
+    effect_add_target: Option<u64>,
+    effect_menu_bounds: Rc<Cell<gpui::Bounds<gpui::Pixels>>>,
     effect_edit: Option<crate::timeline::Document>,
     effect_cancelled: bool,
     pointer_down: bool,
-    effect_drag: Option<u64>,
+    effect_drag: Option<(u64, &'static str)>,
     effects_focus: FocusHandle,
     #[cfg(target_os = "windows")]
     preview: Option<crate::preview::Preview>,
@@ -82,6 +87,28 @@ impl Editor {
         .detach();
         cx.on_blur(&edit_focus, window, |editor, _, cx| {
             editor.finish_clip_drag(true, cx);
+        })
+        .detach();
+        let effect_menu = cx.new(|cx| {
+            gpui_kit::prelude::ContextMenu::new("effect-menu", window, cx).name("エフェクトを追加")
+        });
+        cx.subscribe(&effect_menu, |editor, _, event, cx| match event {
+            gpui_kit::prelude::ContextMenuEvent::Invoked(id) => {
+                let clip_id = editor
+                    .effect_add_target
+                    .take()
+                    .expect("effect menu has a target");
+                editor.start_effect_creation(
+                    crate::effects::definition(id),
+                    CreationTarget::Effect { clip_id },
+                    cx,
+                );
+            }
+            gpui_kit::prelude::ContextMenuEvent::Unavailable(error) => {
+                editor.preview_error = Some(format!("メニューを表示できません: {error}"));
+                cx.notify();
+            }
+            _ => {}
         })
         .detach();
         cx.observe_window_activation(window, |editor, window, cx| {
@@ -143,6 +170,9 @@ impl Editor {
             bad_drop: false,
             object_menu,
             addition_target: None,
+            effect_menu,
+            effect_add_target: None,
+            effect_menu_bounds: Rc::new(Cell::new(gpui::Bounds::default())),
             effect_edit: None,
             effect_cancelled: false,
             pointer_down: false,
@@ -158,7 +188,12 @@ impl Editor {
     }
 
     #[cfg(target_os = "windows")]
-    fn open_image(&mut self, layer: usize, frame: u64, cx: &mut Context<Self>) {
+    fn open_image(
+        &mut self,
+        definition: &'static EffectDefinition,
+        target: CreationTarget,
+        cx: &mut Context<Self>,
+    ) {
         if self.loading || self.gpu_failed {
             return;
         }
@@ -218,15 +253,10 @@ impl Editor {
                                 .register_image(id, image)
                             {
                                 Ok(()) => {
-                                    editor.timeline.add_object(
-                                        crate::timeline::ObjectKind::Input {
-                                            input: crate::timeline::InputSource::Image(Rc::new(
-                                                asset,
-                                            )),
-                                            output: crate::timeline::OutputDestination::Canvas,
-                                        },
-                                        layer,
-                                        frame,
+                                    editor.insert_effect(
+                                        definition,
+                                        target,
+                                        vec![Resource::Image(Rc::new(asset))],
                                     );
                                     editor.sync_timeline();
                                     editor.preview_error = None;
@@ -566,6 +596,7 @@ impl Render for Editor {
                     ),
             )
             .child(self.object_menu.clone())
+            .child(self.effect_menu.clone())
             .child(self.divider(Panel::Timeline, cx))
             .child(
                 div()

@@ -1,4 +1,5 @@
-use std::{collections::HashSet, rc::Rc, time::Instant};
+use crate::effects::EffectInstance;
+use std::{collections::HashSet, time::Instant};
 
 pub const FPS: u64 = 30;
 pub const INITIAL_LENGTH: u64 = FPS * 5;
@@ -12,53 +13,26 @@ pub struct ImageAsset {
     pub height: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EffectKind {
-    Opacity(u8),
-    Invert,
-}
-
-impl EffectKind {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::Opacity(_) => "不透明度",
-            Self::Invert => "色反転",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Effect {
-    pub id: u64,
-    pub kind: EffectKind,
-    pub enabled: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum InputSource {
-    Image(Rc<ImageAsset>),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum OutputDestination {
     Canvas,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ObjectKind {
     Input {
-        input: InputSource,
+        input: EffectInstance,
         output: OutputDestination,
     },
     Filter,
     Effect,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Clip {
     pub id: u64,
     pub kind: ObjectKind,
-    pub effects: Vec<Effect>,
+    pub effects: Vec<EffectInstance>,
     pub layer: usize,
     pub start: u64,
     pub length: u64,
@@ -67,23 +41,40 @@ pub struct Clip {
 impl Clip {
     pub fn image(&self) -> Option<&ImageAsset> {
         match &self.kind {
-            ObjectKind::Input {
-                input: InputSource::Image(image),
-                ..
-            } => Some(image),
+            ObjectKind::Input { input, .. } => input.resources.first().map(|r| r.image()),
             _ => None,
         }
     }
 
     pub fn name(&self) -> &str {
         match &self.kind {
-            ObjectKind::Input {
-                input: InputSource::Image(image),
-                ..
-            } => &image.name,
+            ObjectKind::Input { input, .. } => match self.image() {
+                Some(image) => &image.name,
+                None => input.definition().info.name,
+            },
             ObjectKind::Filter => "フィルタオブジェクト",
             ObjectKind::Effect => "エフェクトオブジェクト",
         }
+    }
+
+    pub fn instances(&self) -> impl Iterator<Item = &EffectInstance> {
+        let input = match &self.kind {
+            ObjectKind::Input { input, .. } => Some(input),
+            _ => None,
+        };
+        input.into_iter().chain(&self.effects)
+    }
+
+    pub fn instance_mut(&mut self, id: u64) -> &mut EffectInstance {
+        if let ObjectKind::Input { input, .. } = &mut self.kind
+            && input.id == id
+        {
+            return input;
+        }
+        self.effects
+            .iter_mut()
+            .find(|effect| effect.id == id)
+            .expect("edited effect exists")
     }
 
     pub fn end(&self) -> u64 {
@@ -91,7 +82,7 @@ impl Clip {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq)]
 pub struct Document {
     pub clips: Vec<Clip>,
     pub layers: usize,
@@ -285,7 +276,9 @@ impl Timeline {
                 document
                     .clips
                     .iter()
-                    .filter_map(|c| c.image().map(|i| i.id))
+                    .flat_map(Clip::instances)
+                    .flat_map(|effect| &effect.resources)
+                    .map(|r| r.image().id)
             })
             .collect()
     }

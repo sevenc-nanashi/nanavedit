@@ -68,7 +68,7 @@ Undo／Redoは最大100操作で、ドラッグ1回を1操作として扱いま�
 
 ## エフェクト
 
-各オブジェクトの設定パネルで「不透明度」「色反転」を追加できます。
+各オブジェクトの設定パネルの「エフェクトを追加」メニューから「不透明度」「色反転」を追加できます。
 追加順に評価し、有効／無効の切替、並べ替え、削除ができます。
 不透明度は0〜100%（初期100%）で、複数指定すると乗算します。
 色反転は線形RGBを反転し、アルファを保持します。2回適用すると元の色に戻ります。
@@ -87,6 +87,99 @@ Escapeで変更を取り消し、フォーカス移動で確定します。
 対象は現在フレームごとに決まり、対象がない場合は描画に影響せず「適用対象なし」と表示します。
 入力と通常のエフェクトは元画像の解像度、フィルタはプレビュー解像度で処理します。
 出力先は画面のみです。音声、Lua／HLSL、キーフレームは未対応です。
+
+### Rustでエフェクトを追加する
+
+`src/effects.rs` の登録一覧が、入力追加メニュー・エフェクト追加メニュー・設定UI・評価の定義元です。
+`src/effects/` に定義と処理を追加し、モジュール宣言と `definitions()` の一覧に登録します。
+エディターや評価ループに種類IDの分岐を追加する必要はありません。
+既存の実装は `image.rs`（画像入力）、`opacity.rs`（描画属性）、`invert.rs`（GPU画像処理）を参照してください。
+
+- `EffectInfo`：種類ID、表示名、入力／通常処理、パラメーター定義、初期化方法、時間依存の有無。
+- `EffectInstance`：配置ID、種類ID、設定値、有効状態、画像リソース参照。Undo／Redoではこのデータを複製します。
+- `EffectProcessor`：種類ごとに遅延生成して共有する処理。パイプラインなどを保持でき、配置固有の設定値は `params` から受け取ります。
+- `RenderParams`：評価ごとに初期化する描画属性。現在は不透明度です。
+
+設定値は `Integer(i32)`・`Float(f32)`・`Bool(bool)` です。数値はSlider、真偽値はCheckboxになります。
+数値定義には範囲、刻み、表示桁数、単位を指定します。整数の範囲はSliderで正確に表せる±16,777,216以内です。
+種類ID・パラメーターIDの重複、型と範囲の不整合、範囲外の既定値は起動時にエラーにします。
+
+例えば小数と真偽値を持つ処理は、次のように定義できます（追加例であり、組み込みには含めていません）。
+`src/effects/gain.rs` に置き、`src/effects.rs` に `mod gain;` と `gain::definition()` の登録を追加します。
+
+```rust
+use super::*;
+
+pub(super) fn definition() -> EffectDefinition {
+    EffectDefinition {
+        info: EffectInfo {
+            id: "example.gain",
+            name: "不透明度倍率",
+            role: EffectRole::Effect,
+            param_definitions: &[
+                ParamDefinition {
+                    id: "gain",
+                    name: "倍率",
+                    default: ParamValue::Float(1.0),
+                    number: Some(NumberDefinition {
+                        min: 0.0, max: 1.0, step: 0.01,
+                        precision: 2, unit: "倍",
+                    }),
+                },
+                ParamDefinition {
+                    id: "bypass", name: "処理を省略",
+                    default: ParamValue::Bool(false), number: None,
+                },
+            ],
+            initialization: Initialization::Defaults,
+            time_dependent: false,
+        },
+        #[cfg(target_os = "windows")]
+        create_processor: |_| Ok(Box::new(Gain)),
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct Gain;
+
+#[cfg(target_os = "windows")]
+impl EffectProcessor for Gain {
+    fn process(
+        &mut self,
+        source: Option<Source>,
+        params: &[Param],
+        render_params: &mut RenderParams,
+        _context: &mut ProcessContext<'_>,
+    ) -> anyhow::Result<Source> {
+        if param(params, "bypass") == ParamValue::Bool(false) {
+            render_params.alpha *= param(params, "gain").number();
+        }
+        source.ok_or_else(|| anyhow::anyhow!("入力画像がありません"))
+    }
+}
+```
+
+入力は `role: EffectRole::Input` とし、`source: None` で呼ばれます。
+`Initialization::Defaults` は既定値だけで追加し、`ImageFile` は既存のPNG／JPEG選択・読み込みを行って
+`context.bindings` に画像参照を渡します。キャンセル・失敗では配置を作りません。
+読み込み済み画像は `context.image(0)?` で取得できます。入力のパラメーターも同じ設定UIで編集できます。
+履歴の画像保持は、入力と通常エフェクトのすべてのリソース参照を収集します。
+
+`ProcessContext` はローカル／シーンのフレーム、fps、ローカル時刻、オブジェクト／エフェクトID、
+レイヤー、画面寸法とGPU操作を提供します。時間で結果が変わる処理は `time_dependent: true` を指定します。
+有効な評価経路に時間依存の処理がある場合だけ、フレーム変更で再描画します。対象のないエフェクトは含めません。
+処理は種類ごとに共有するため、配置固有の値やフレームをまたいで積み上がる結果を内部に保持しないでください。
+
+GPU処理は `context.create_pipeline()` でパイプラインを初期化し、処理インスタンス内に保持します。
+共通の頂点処理、`Vertex.uv`、`@group(0)` の画像・サンプラーに、独自の `fs_main` を組み合わせます。
+独自のuniformは `@group(1) @binding(0)` に定義でき、`context.render()` へ16バイト単位のバイト列を渡します。
+`context.acquire()` でRGBA16Floatの中間画像を取得し、乗算済みアルファの線形RGBを書き込みます。
+元画像を上書きせず、使用済み入力は `context.release()` に返し、出力は所有権ごと返します。
+画像を返すだけの処理では、その画像をreleaseしません。元画像のアルファ形式は `Source::premultiplied()` で確認できます。
+複雑な処理ではdevice・queue・encoderにもアクセスできます。
+
+定義は全OSで使えますが、現在の実行バックエンドはWindowsのみです。
+外部ファイルからの定義／WGSL読み込み、Lua、DLL、独自設定UI、色・文字列パラメーターは未対応です。
 
 ## 画像プレビュー（Windows）
 
@@ -131,5 +224,7 @@ Windowsで画像追加、クリップ移動・長さ変更、同一レイヤー�
 ズーム後のシーク座標とスクロールを確認しています。
 macOS/Linuxでの実機動作、表示倍率100%／150%の比較、GPU喪失からの動作は未検証です。
 
-エフェクト基盤はWindowsで最低限の手動動作確認を行っています。
-フィルタ境界・時間範囲・取消操作の全組み合わせやGPUメモリ負荷は未検証です。
+エフェクト基盤はWindowsで登録定義からの追加メニュー、画像入力、色反転の連続適用、
+不透明度のドラッグとUndo／Redoを手動確認しています。
+追加例の小数・真偽値UI、時間依存エフェクト、フィルタ境界・時間範囲・取消操作の全組み合わせ、
+GPUメモリ負荷は未検証です。

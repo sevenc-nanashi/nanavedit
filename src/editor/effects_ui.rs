@@ -1,16 +1,231 @@
 use super::*;
-use crate::timeline::{Effect, EffectKind, FPS, ObjectKind};
-use gpui_kit::prelude::Slider;
+use crate::effects::{ParamDefinition, ParamValue};
+use crate::timeline::{FPS, ObjectKind, OutputDestination};
+use gpui_kit::prelude::{Checkbox, Slider};
+
+#[derive(Clone, Copy)]
+pub(super) enum CreationTarget {
+    Input { layer: usize, frame: u64 },
+    Effect { clip_id: u64 },
+}
 
 #[derive(Clone)]
 enum EffectCommand {
-    Add(EffectKind),
     Toggle(u64),
     Remove(u64),
     Move(u64, isize),
 }
 
 impl Editor {
+    pub(super) fn can_initialize(&self, definition: &EffectDefinition) -> bool {
+        if self.loading {
+            return false;
+        }
+        match definition.info.initialization {
+            Initialization::Defaults => true,
+            Initialization::ImageFile => {
+                #[cfg(target_os = "windows")]
+                {
+                    !self.gpu_failed
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    false
+                }
+            }
+        }
+    }
+
+    pub(super) fn start_effect_creation(
+        &mut self,
+        definition: &'static EffectDefinition,
+        target: CreationTarget,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_initialize(definition) {
+            return;
+        }
+        self.finish_clip_drag(false, cx);
+        self.finish_effect_edit(false, cx);
+        self.timeline.playing = None;
+        match definition.info.initialization {
+            Initialization::Defaults => {
+                self.insert_effect(definition, target, Vec::new());
+                self.sync_timeline();
+            }
+            Initialization::ImageFile => {
+                #[cfg(target_os = "windows")]
+                self.open_image(definition, target, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn insert_effect(
+        &mut self,
+        definition: &'static EffectDefinition,
+        target: CreationTarget,
+        resources: Vec<Resource>,
+    ) {
+        let instance = EffectInstance::new(self.timeline.allocate_id(), definition, resources);
+        match target {
+            CreationTarget::Input { layer, frame } => self.timeline.add_object(
+                ObjectKind::Input {
+                    input: instance,
+                    output: OutputDestination::Canvas,
+                },
+                layer,
+                frame,
+            ),
+            CreationTarget::Effect { clip_id } => {
+                let before = self.timeline.document.clone();
+                self.timeline
+                    .document
+                    .clips
+                    .iter_mut()
+                    .find(|c| c.id == clip_id)
+                    .expect("effect target exists")
+                    .effects
+                    .push(instance);
+                self.timeline.commit(before);
+            }
+        }
+    }
+
+    fn open_effect_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        self.finish_effect_edit(false, cx);
+        self.timeline.playing = None;
+        self.effect_add_target = self.timeline.selected;
+        let items = crate::effects::definitions()
+            .iter()
+            .filter(|d| d.info.role == EffectRole::Effect)
+            .map(|d| {
+                gpui_kit::prelude::MenuItem::command(d.info.id, d.info.name)
+                    .disabled(!self.can_initialize(d))
+            })
+            .collect();
+        let position = self.effect_menu_bounds.get().bottom_left();
+        let result = self.effect_menu.update(cx, |menu, cx| {
+            menu.set_items(items, window, cx)?;
+            menu.open_at(position, window, cx)
+        });
+        if let Err(error) = result {
+            self.preview_error = Some(format!("メニューを表示できません: {error}"));
+        }
+        cx.notify();
+    }
+
+    fn change_param(
+        &mut self,
+        clip_id: u64,
+        effect_id: u64,
+        definition: &'static ParamDefinition,
+        value: ParamValue,
+        cx: &mut Context<Self>,
+    ) {
+        if self.loading
+            || self.effect_cancelled
+            || (self.pointer_down && self.effect_drag != Some((effect_id, definition.id)))
+        {
+            return;
+        }
+        if self.effect_edit.is_none() {
+            self.effect_edit = Some(self.timeline.document.clone());
+        }
+        self.timeline.playing = None;
+        let effect = self
+            .timeline
+            .document
+            .clips
+            .iter_mut()
+            .find(|c| c.id == clip_id)
+            .expect("edited object exists")
+            .instance_mut(effect_id);
+        effect
+            .params
+            .iter_mut()
+            .find(|p| p.id == definition.id)
+            .expect("edited parameter exists")
+            .value = value;
+        if matches!(value, ParamValue::Bool(_)) {
+            self.finish_effect_edit(false, cx);
+        }
+        cx.notify();
+    }
+
+    fn param_control(
+        &self,
+        clip_id: u64,
+        effect: &EffectInstance,
+        definition: &'static ParamDefinition,
+        value: ParamValue,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let effect_id = effect.id;
+        let param_id = definition.id;
+        let id = gpui::SharedString::from(format!("effect-{effect_id}-param-{param_id}"));
+        let entity = cx.entity().downgrade();
+        let disabled = self.loading || !effect.enabled;
+        let control = match value {
+            ParamValue::Bool(value) => Checkbox::new(id)
+                .label(definition.name)
+                .checked(value)
+                .disabled(disabled)
+                .on_change(move |value, _, cx| {
+                    let _ = entity.update(cx, |editor, cx| {
+                        editor.change_param(
+                            clip_id,
+                            effect_id,
+                            definition,
+                            ParamValue::Bool(value),
+                            cx,
+                        )
+                    });
+                })
+                .into_any_element(),
+            ParamValue::Integer(_) | ParamValue::Float(_) => {
+                let number = definition.number.expect("numeric parameter has a range");
+                Slider::new(id)
+                    .label(definition.name)
+                    .range(number.min, number.max)
+                    .step(number.step)
+                    .value(value.number())
+                    .display(format!(
+                        "{:.*}{}",
+                        number.precision,
+                        value.number(),
+                        number.unit
+                    ))
+                    .disabled(disabled)
+                    .on_change(move |value, _, cx| {
+                        let _ = entity.update(cx, |editor, cx| {
+                            editor.change_param(
+                                clip_id,
+                                effect_id,
+                                definition,
+                                definition.slider_value(value),
+                                cx,
+                            )
+                        });
+                    })
+                    .into_any_element()
+            }
+        };
+        div()
+            .capture_any_mouse_down(cx.listener(
+                move |editor, event: &gpui::MouseDownEvent, _, _| {
+                    if event.button == MouseButton::Left {
+                        editor.effect_drag = Some((effect_id, param_id));
+                    }
+                },
+            ))
+            .child(control)
+            .into_any_element()
+    }
+
     pub(super) fn finish_effect_edit(&mut self, cancel: bool, cx: &mut Context<Self>) {
         if let Some(before) = self.effect_edit.take() {
             if cancel {
@@ -31,11 +246,6 @@ impl Editor {
         self.finish_effect_edit(false, cx);
         self.timeline.playing = None;
         let before = self.timeline.document.clone();
-        let new_id = if matches!(command, EffectCommand::Add(_)) {
-            Some(self.timeline.allocate_id())
-        } else {
-            None
-        };
         let Some(clip) = self
             .timeline
             .document
@@ -46,11 +256,6 @@ impl Editor {
             return;
         };
         match command {
-            EffectCommand::Add(kind) => clip.effects.push(Effect {
-                id: new_id.expect("allocated effect ID"),
-                kind,
-                enabled: true,
-            }),
             EffectCommand::Toggle(id) => {
                 let effect = clip
                     .effects
@@ -130,36 +335,43 @@ impl Editor {
                 None => "適用対象なし".to_owned(),
             });
         }
+        let entity = cx.entity().downgrade();
+        let bounds = self.effect_menu_bounds.clone();
         details = details.child(
             div()
-                .flex()
-                .gap_1()
-                .child(self.effect_button(
-                    "add-opacity".into(),
-                    "不透明度を追加",
-                    EffectCommand::Add(EffectKind::Opacity(100)),
-                    false,
-                    cx,
-                ))
-                .child(self.effect_button(
-                    "add-invert".into(),
-                    "色反転を追加",
-                    EffectCommand::Add(EffectKind::Invert),
-                    false,
-                    cx,
-                )),
+                .on_children_prepainted(move |children, _, _| {
+                    if let Some(first) = children.first() {
+                        bounds.set(*first);
+                    }
+                })
+                .child(
+                    Button::new("add-effect")
+                        .label("エフェクトを追加")
+                        .secondary()
+                        .control_size(ControlSize::Sm)
+                        .disabled(self.loading)
+                        .on_click(move |window, cx| {
+                            let _ =
+                                entity.update(cx, |editor, cx| editor.open_effect_menu(window, cx));
+                        }),
+                ),
         );
-        for (index, effect) in clip.effects.iter().enumerate() {
+        let input_count = usize::from(matches!(clip.kind, ObjectKind::Input { .. }));
+        for (position, effect) in clip.instances().enumerate() {
             let id = effect.id;
+            let info = &effect.definition().info;
             let mut card = div()
                 .flex()
                 .flex_col()
                 .gap_2()
                 .p_2()
                 .border_1()
-                .border_color(theme.colors.divider)
-                .child(format!("{}. {}", index + 1, effect.kind.name()))
-                .child(
+                .border_color(theme.colors.divider);
+            if position < input_count {
+                card = card.child(format!("入力: {}", info.name));
+            } else {
+                let index = position - input_count;
+                card = card.child(format!("{}. {}", index + 1, info.name)).child(
                     div()
                         .flex()
                         .flex_wrap()
@@ -197,58 +409,10 @@ impl Editor {
                             cx,
                         )),
                 );
-            if let EffectKind::Opacity(value) = effect.kind {
-                let entity = cx.entity().downgrade();
-                let clip_id = clip.id;
-                card = card.child(
-                    div()
-                        .capture_any_mouse_down(cx.listener(
-                            move |editor, event: &gpui::MouseDownEvent, _, _| {
-                                if event.button == MouseButton::Left {
-                                    editor.effect_drag = Some(id);
-                                }
-                            },
-                        ))
-                        .child(
-                            Slider::new(gpui::SharedString::from(format!("effect-{id}-opacity")))
-                                .label("不透明度")
-                                .range(0.0, 100.0)
-                                .step(1.0)
-                                .value(value as f32)
-                                .display(format!("{value}%"))
-                                .disabled(self.loading || !effect.enabled)
-                                .on_change(move |value, _, cx| {
-                                    let _ = entity.update(cx, |editor, cx| {
-                                        if editor.loading
-                                            || editor.effect_cancelled
-                                            || (editor.pointer_down
-                                                && editor.effect_drag != Some(id))
-                                        {
-                                            return;
-                                        }
-                                        if editor.effect_edit.is_none() {
-                                            editor.effect_edit =
-                                                Some(editor.timeline.document.clone());
-                                        }
-                                        editor.timeline.playing = None;
-                                        let clip = editor
-                                            .timeline
-                                            .document
-                                            .clips
-                                            .iter_mut()
-                                            .find(|c| c.id == clip_id)
-                                            .expect("edited object exists");
-                                        let effect = clip
-                                            .effects
-                                            .iter_mut()
-                                            .find(|e| e.id == id)
-                                            .expect("edited effect exists");
-                                        effect.kind = EffectKind::Opacity(value.round() as u8);
-                                        cx.notify();
-                                    });
-                                }),
-                        ),
-                );
+            }
+            for definition in info.param_definitions {
+                let value = crate::effects::param(&effect.params, definition.id);
+                card = card.child(self.param_control(clip.id, effect, definition, value, cx));
             }
             details = details.child(card);
         }

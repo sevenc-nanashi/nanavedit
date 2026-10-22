@@ -1,6 +1,6 @@
-mod effects;
+pub(crate) mod effects;
 use crate::timeline::Clip;
-use effects::Source;
+use effects::{EffectProcessor, GpuResources};
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
@@ -157,9 +157,9 @@ impl Preview {
     pub fn set_objects(&self, objects: Vec<Clip>, frame: u64) {
         let mut gpu = self.native.gpu.borrow_mut();
         if let Some(gpu) = gpu.as_mut() {
+            let time_changed = gpu.frame != frame && effects::depends_on_time(&objects);
             gpu.frame = frame;
-            // The current built-ins are static; time alone does not invalidate the image.
-            if gpu.visible != objects {
+            if gpu.visible != objects || time_changed {
                 gpu.visible = objects;
                 self.native.invalidate();
             }
@@ -169,7 +169,7 @@ impl Preview {
     pub fn retain_images(&self, retained: &HashSet<u64>) {
         // shortcut: history keeps images resident; add an eviction budget for large projects.
         if let Some(gpu) = self.native.gpu.borrow_mut().as_mut() {
-            gpu.images.retain(|id, _| retained.contains(id));
+            gpu.resources.images.retain(|id, _| retained.contains(id));
         }
     }
 }
@@ -318,13 +318,8 @@ struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    pipeline: wgpu::RenderPipeline,
-    images: HashMap<u64, Source>,
-    effect_pipeline: wgpu::RenderPipeline,
-    image_layout: wgpu::BindGroupLayout,
-    params_layout: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
-    scratch: Vec<Source>,
+    resources: GpuResources,
+    processors: HashMap<&'static str, Box<dyn EffectProcessor>>,
     visible: Vec<Clip>,
     frame: u64,
 }
@@ -389,10 +384,6 @@ impl Gpu {
             .context("描画Surfaceに対応していません")?;
         config.format = format;
         config.present_mode = wgpu::PresentMode::Fifo;
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("preview"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("preview.wgsl").into()),
-        });
         let image_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("effect image"),
             entries: &[
@@ -422,45 +413,27 @@ impl Gpu {
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(16),
+                    min_binding_size: None,
                 },
                 count: None,
             }],
         });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("effects"),
-            bind_group_layouts: &[Some(&image_layout), Some(&params_layout)],
-            immediate_size: 0,
-        });
-        let make_pipeline = |format| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("preview effects"),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: Default::default(),
-                depth_stencil: None,
-                multisample: Default::default(),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
-        let pipeline = make_pipeline(format);
-        let effect_pipeline = make_pipeline(wgpu::TextureFormat::Rgba16Float);
+        let pipeline = effects::create_pipeline(
+            &device,
+            [&image_layout, &params_layout],
+            "composite / present",
+            include_str!("preview.wgsl"),
+            format,
+            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+        )?;
+        let effect_pipeline = effects::create_pipeline(
+            &device,
+            [&image_layout, &params_layout],
+            "composite",
+            include_str!("preview.wgsl"),
+            wgpu::TextureFormat::Rgba16Float,
+            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+        )?;
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
@@ -471,16 +444,22 @@ impl Gpu {
         config.height = 0;
         Ok(Self {
             surface,
-            device,
-            queue,
+            device: device.clone(),
+            queue: queue.clone(),
             config,
-            pipeline,
-            effect_pipeline,
-            image_layout,
-            params_layout,
-            sampler,
-            scratch: Vec::new(),
-            images: HashMap::new(),
+            resources: GpuResources {
+                device,
+                queue,
+                pipeline,
+                effect_pipeline,
+                image_layout,
+                params_layout,
+                sampler,
+                scratch: Vec::new(),
+                used_sizes: HashSet::new(),
+                images: HashMap::new(),
+            },
+            processors: HashMap::new(),
             visible: Vec::new(),
             frame: 0,
         })
@@ -519,8 +498,8 @@ impl Gpu {
             size,
         );
         let view = texture.create_view(&Default::default());
-        let source = self.source(view, width, height, false);
-        self.images.insert(id, source);
+        let source = self.resources.source(view, width, height, false);
+        self.resources.images.insert(id, source);
         Ok(())
     }
 
