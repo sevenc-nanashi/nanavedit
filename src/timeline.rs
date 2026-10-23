@@ -216,6 +216,46 @@ impl Timeline {
         self.commit(before);
     }
 
+    pub fn nearest_start(&self, clip: &Clip) -> Option<u64> {
+        let mut occupied: Vec<_> = self
+            .document
+            .clips
+            .iter()
+            .filter(|other| other.id != clip.id && other.layer == clip.layer)
+            .map(|other| (other.start, other.end()))
+            .collect();
+        occupied.sort_unstable();
+        let mut gap_start = 0;
+        let mut nearest = None;
+        for (start, end) in occupied.into_iter().chain([(u64::MAX, u64::MAX)]) {
+            if start - gap_start >= clip.length {
+                let candidate = clip.start.clamp(gap_start, start - clip.length);
+                let key = (candidate.abs_diff(clip.start), candidate);
+                if nearest.is_none_or(|best| key < best) {
+                    nearest = Some(key);
+                }
+            }
+            gap_start = end;
+        }
+        nearest.map(|(_, start)| start)
+    }
+
+    pub fn resize_bounds(&self, original: &Clip) -> (u64, u64) {
+        let mut start = 0;
+        let mut end = u64::MAX;
+        for other in &self.document.clips {
+            if other.id == original.id || other.layer != original.layer {
+                continue;
+            }
+            if other.end() <= original.start {
+                start = start.max(other.end());
+            } else if other.start >= original.end() {
+                end = end.min(other.start);
+            }
+        }
+        (start, end)
+    }
+
     pub fn place(&mut self, clip: Clip) -> bool {
         if clip.length == 0
             || self.document.clips.iter().any(|other| {

@@ -333,19 +333,27 @@ impl Editor {
                             return;
                         }
                         clip.layer = ((position.y - RULER) / ROW).floor() as usize;
+                        let Some(start) = self.timeline.nearest_start(&clip) else {
+                            self.bad_drop = true;
+                            cx.notify();
+                            return;
+                        };
+                        clip.start = start;
                     }
                     Edit::Start => {
+                        let (start, _) = self.timeline.resize_bounds(original);
                         clip.start = original
                             .start
                             .saturating_add_signed(delta)
-                            .min(original.end() - 1);
+                            .clamp(start, original.end() - 1);
                         clip.length = original.end() - clip.start;
                     }
                     Edit::End => {
+                        let (_, end) = self.timeline.resize_bounds(original);
                         clip.length = original
                             .end()
                             .saturating_add_signed(delta)
-                            .max(original.start + 1)
+                            .clamp(original.start + 1, end)
                             - original.start;
                     }
                 }
