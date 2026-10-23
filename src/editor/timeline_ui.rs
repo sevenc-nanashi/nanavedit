@@ -447,6 +447,8 @@ impl Editor {
 
     pub(super) fn timeline_content(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::get(cx).clone();
+        let appearance = crate::settings::current(cx);
+        let palette = &appearance.theme.palette;
         let viewport_height = self.timeline_height - HEADER - theme.measures.scrollbar_track;
         let top = -f32::from(self.timeline_scroll.offset().y);
         let first_layer = (((top - RULER).max(0.0) / ROW).floor() as usize).saturating_sub(1);
@@ -555,19 +557,10 @@ impl Editor {
                     .h(px(ROW - 6.0))
                     .overflow_hidden()
                     .rounded_sm()
-                    .bg(gpui::rgb(match (&clip.kind, selected) {
-                        (ObjectKind::Input { .. }, true) => 0x315f88,
-                        (ObjectKind::Input { .. }, false) => 0x304352,
-                        (ObjectKind::Filter, true) => 0x78612f,
-                        (ObjectKind::Filter, false) => 0x51452c,
-                        (ObjectKind::Effect, true) => 0x71528a,
-                        (ObjectKind::Effect, false) => 0x4d3e5b,
-                        (ObjectKind::Camera { .. }, true) => 0x39766a,
-                        (ObjectKind::Camera { .. }, false) => 0x304d48,
-                    }))
+                    .bg(palette.object(appearance.object_colors.color_index(&clip.kind), selected))
                     .border_1()
                     .border_color(if selected {
-                        theme.colors.focus
+                        palette.paint(6)
                     } else {
                         theme.colors.divider
                     })
@@ -629,7 +622,7 @@ impl Editor {
                 .top_0()
                 .w(px(2.0))
                 .h(px(height))
-                .child(timeline_line(gpui::rgb(0xff6767).into()).size_full()),
+                .child(timeline_line(palette.paint(8)).size_full()),
         );
         let selected = self
             .timeline

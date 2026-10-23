@@ -19,11 +19,11 @@ const HEADER: f32 = 36.0;
 const PADDING: f32 = 24.0;
 
 #[cfg(target_os = "windows")]
-const UI_FONT: &str = "Yu Gothic UI";
+pub(crate) const UI_FONT: &str = "Yu Gothic UI";
 #[cfg(target_os = "macos")]
-const UI_FONT: &str = "Hiragino Sans";
+pub(crate) const UI_FONT: &str = "Hiragino Sans";
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-const UI_FONT: &str = "Noto Sans CJK JP";
+pub(crate) const UI_FONT: &str = "Noto Sans CJK JP";
 
 #[derive(Clone, Copy)]
 enum Panel {
@@ -327,6 +327,13 @@ impl Editor {
             .justify_between()
             .child("プレビュー")
             .when(self.loading, |header| header.child("読み込み中…"))
+            .child(
+                Button::new("app-settings")
+                    .label("アプリ設定")
+                    .secondary()
+                    .control_size(ControlSize::Sm)
+                    .on_click(|_, cx| crate::settings::open(cx)),
+            )
     }
 
     fn preview_content(&self, frame_width: f32, theme: &Theme) -> impl IntoElement {
@@ -554,6 +561,12 @@ impl Render for Editor {
             .text_color(theme.colors.text)
             .font_family(UI_FONT)
             .text_size(px(13.0))
+            .capture_key_down(|event, _, cx| {
+                if event.keystroke.modifiers.control && event.keystroke.key == "," {
+                    crate::settings::open(cx);
+                    cx.stop_propagation();
+                }
+            })
             .capture_any_mouse_down(cx.listener(|editor, event: &gpui::MouseDownEvent, _, cx| {
                 editor.finish_effect_edit(false, cx);
                 editor.pointer_down = event.button == MouseButton::Left;
