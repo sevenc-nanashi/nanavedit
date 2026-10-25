@@ -169,6 +169,8 @@ impl Base16Scheme {
         };
         document.meta.id = "nanavedit-base16".into();
         document.meta.name.clone_from(&self.name);
+        // shortcut: Disable scroll fading until wide primitives remain visible upstream.
+        document.effect.edge_fade_band = 0.0;
         let b = |index| self.palette.hex(index).to_owned();
         let colors = &mut document.color;
         colors.surface = tokens::SurfaceColors {
