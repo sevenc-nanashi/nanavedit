@@ -53,6 +53,7 @@ pub trait EffectProcessor {
 }
 
 pub struct ProcessContext<'a> {
+    videos: &'a super::video::VideoTextures,
     resources: &'a mut GpuResources,
     pub encoder: &'a mut wgpu::CommandEncoder,
     pub object_id: u64,
@@ -77,7 +78,10 @@ impl ProcessContext<'_> {
     }
 
     pub fn image(&self, file: &FileAsset) -> Result<Source> {
-        let asset = file.resource.image();
+        let asset = file
+            .resource
+            .image()
+            .context("画像ファイルではありません")?;
         let source = self
             .resources
             .images
@@ -91,6 +95,14 @@ impl ProcessContext<'_> {
             premultiplied: source.premultiplied,
             temporary: false,
         })
+    }
+
+    pub fn video(&self, file: &FileAsset) -> Result<Source> {
+        anyhow::ensure!(
+            matches!(file.resource, crate::effects::Resource::Video(_)),
+            "動画ファイルではありません"
+        );
+        self.videos.get(self.object_id)
     }
 
     /// Temporary outputs use premultiplied linear RGBA16Float.
@@ -222,12 +234,12 @@ struct DrawTarget<'a> {
 }
 
 pub struct Source {
-    view: wgpu::TextureView,
-    binding: wgpu::BindGroup,
-    width: u32,
-    height: u32,
-    premultiplied: bool,
-    temporary: bool,
+    pub(super) view: wgpu::TextureView,
+    pub(super) binding: wgpu::BindGroup,
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) premultiplied: bool,
+    pub(super) temporary: bool,
 }
 
 impl Source {
@@ -618,6 +630,7 @@ impl Gpu {
         }
         let definition = effect.definition();
         let mut context = ProcessContext {
+            videos: &self.videos,
             resources: &mut self.resources,
             encoder,
             object_id: evaluation.object.id,

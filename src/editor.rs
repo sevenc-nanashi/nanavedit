@@ -9,6 +9,8 @@ use gpui_kit::prelude::{Button, ControlSize, Disableable, Sizable};
 use std::{cell::Cell, rc::Rc};
 mod effects_ui;
 mod timeline_ui;
+#[cfg(target_os = "windows")]
+mod video_input;
 use gpui_kit::{
     semantics::{NodeSpec, Role, Semantic, SemanticCoordinator},
     theme::Theme,
@@ -69,6 +71,8 @@ pub struct Editor {
     preview_error: Option<String>,
     #[cfg(target_os = "windows")]
     gpu_failed: bool,
+    #[cfg(target_os = "windows")]
+    video_state: video_input::VideoState,
 }
 
 impl Editor {
@@ -196,6 +200,8 @@ impl Editor {
             preview_error,
             #[cfg(target_os = "windows")]
             gpu_failed,
+            #[cfg(target_os = "windows")]
+            video_state: Default::default(),
         }
     }
 
@@ -207,6 +213,10 @@ impl Editor {
         definition: &'static crate::effects::ParamDefinition,
         cx: &mut Context<Self>,
     ) {
+        if definition.file == Some(crate::effects::FileKind::Video) {
+            self.open_video_parameter(clip_id, effect_id, definition, cx);
+            return;
+        }
         if self.loading || self.gpu_failed {
             return;
         }
@@ -225,6 +235,7 @@ impl Editor {
             multiple: false,
             prompt: Some(match kind {
                 crate::effects::FileKind::Image => "PNG / JPEG画像を開く".into(),
+                crate::effects::FileKind::Video => unreachable!("handled video input"),
             }),
         });
         self.loading = true;
@@ -246,6 +257,7 @@ impl Editor {
                                 crate::preview::load_image(&path, limit)
                                     .map(|image| Some((path, image)))
                             }
+                            crate::effects::FileKind::Video => unreachable!("handled video input"),
                         }
                     })
                     .await
@@ -327,6 +339,19 @@ impl Editor {
             .justify_between()
             .child("プレビュー")
             .when(self.loading, |header| header.child("読み込み中…"))
+            .when(
+                {
+                    #[cfg(target_os = "windows")]
+                    {
+                        self.video_state.busy
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        false
+                    }
+                },
+                |header| header.child("映像を取得中…"),
+            )
             .child(
                 Button::new("app-settings")
                     .label("アプリ設定")
@@ -530,7 +555,8 @@ impl Render for Editor {
         SemanticCoordinator::global(cx).begin_frame(window);
         self.scroll_clip_drag(window, cx);
         self.timeline.tick();
-        self.sync_preview();
+        #[cfg(target_os = "windows")]
+        self.update_preview(cx);
         if self.timeline.playing.is_some() {
             window.request_animation_frame();
         }

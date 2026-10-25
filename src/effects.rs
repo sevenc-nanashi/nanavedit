@@ -10,6 +10,7 @@ mod image;
 mod invert;
 mod opacity;
 mod standard_draw;
+mod video;
 
 #[cfg(target_os = "windows")]
 pub use crate::preview::effects::{EffectProcessor, ProcessContext, RenderParams, Source};
@@ -92,6 +93,7 @@ pub enum EffectRole {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileKind {
     Image,
+    Video,
 }
 
 #[derive(Debug)]
@@ -115,6 +117,7 @@ pub type ProcessorFactory = fn(&ProcessContext<'_>) -> anyhow::Result<Box<dyn Ef
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Resource {
     Image(Arc<ImageAsset>),
+    Video(Arc<crate::media::VideoAsset>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,9 +127,10 @@ pub struct FileAsset {
 }
 
 impl Resource {
-    pub fn image(&self) -> &ImageAsset {
+    pub fn image(&self) -> Option<&ImageAsset> {
         match self {
-            Self::Image(image) => image,
+            Self::Image(image) => Some(image),
+            Self::Video(_) => None,
         }
     }
 }
@@ -173,6 +177,7 @@ pub fn definitions() -> &'static [EffectDefinition] {
     static REGISTRY: LazyLock<Vec<EffectDefinition>> = LazyLock::new(|| {
         let definitions = vec![
             image::definition(),
+            video::definition(),
             opacity::definition(),
             invert::definition(),
             standard_draw::definition(),

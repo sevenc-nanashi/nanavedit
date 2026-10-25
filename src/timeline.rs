@@ -34,13 +34,14 @@ pub struct Clip {
     pub layer: usize,
     pub start: u64,
     pub length: u64,
+    pub source_start: u64,
 }
 
 impl Clip {
     pub fn image(&self) -> Option<&ImageAsset> {
         match &self.kind {
             ObjectKind::Input { input, .. } => {
-                input.files().next().map(|file| file.resource.image())
+                input.files().next().and_then(|file| file.resource.image())
             }
             _ => None,
         }
@@ -48,8 +49,11 @@ impl Clip {
 
     pub fn name(&self) -> &str {
         match &self.kind {
-            ObjectKind::Input { input, .. } => match self.image() {
-                Some(image) => &image.name,
+            ObjectKind::Input { input, .. } => match input.files().next() {
+                Some(file) => match &file.resource {
+                    crate::effects::Resource::Image(image) => &image.name,
+                    crate::effects::Resource::Video(video) => &video.name,
+                },
                 None => input.definition().info.name,
             },
             ObjectKind::Filter => "フィルタオブジェクト",
@@ -65,6 +69,16 @@ impl Clip {
             _ => [None, None],
         };
         fixed.into_iter().flatten().chain(&self.effects)
+    }
+
+    pub fn video(&self) -> Option<&std::sync::Arc<crate::media::VideoAsset>> {
+        let ObjectKind::Input { input, .. } = &self.kind else {
+            return None;
+        };
+        input.files().find_map(|file| match &file.resource {
+            crate::effects::Resource::Video(video) => Some(video),
+            _ => None,
+        })
     }
 
     pub fn instance_mut(&mut self, id: u64) -> &mut EffectInstance {
@@ -202,6 +216,7 @@ impl Timeline {
             layer,
             start,
             length: INITIAL_LENGTH,
+            source_start: 0,
         });
         self.selected = Some(id);
         self.layer = layer;
@@ -252,6 +267,14 @@ impl Timeline {
             } else if other.start >= original.end() {
                 end = end.min(other.start);
             }
+        }
+        if let Some(video) = original.video() {
+            start = start.max(original.start.saturating_sub(original.source_start));
+            end = end.min(
+                original
+                    .start
+                    .saturating_add(video.duration() - original.source_start),
+            );
         }
         (start, end)
     }
@@ -314,7 +337,7 @@ impl Timeline {
                     .iter()
                     .flat_map(Clip::instances)
                     .flat_map(EffectInstance::files)
-                    .map(|file| file.resource.image().id)
+                    .filter_map(|file| file.resource.image().map(|image| image.id))
             })
             .collect()
     }

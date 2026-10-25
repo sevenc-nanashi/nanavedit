@@ -51,17 +51,7 @@ enum Command {
 }
 
 impl Editor {
-    pub(super) fn sync_preview(&self) {
-        #[cfg(target_os = "windows")]
-        if !self.gpu_failed
-            && let Some(preview) = &self.preview
-        {
-            preview.set_objects(self.timeline.active_objects(), self.timeline.frame);
-        }
-    }
-
     pub(super) fn sync_timeline(&self) {
-        self.sync_preview();
         #[cfg(target_os = "windows")]
         if let Some(preview) = &self.preview {
             preview.retain_images(&self.timeline.retained_images());
@@ -347,6 +337,13 @@ impl Editor {
                             .saturating_add_signed(delta)
                             .clamp(start, original.end() - 1);
                         clip.length = original.end() - clip.start;
+                        if original.video().is_some() {
+                            clip.source_start = if clip.start >= original.start {
+                                original.source_start + (clip.start - original.start)
+                            } else {
+                                original.source_start - (original.start - clip.start)
+                            };
+                        }
                     }
                     Edit::End => {
                         let (_, end) = self.timeline.resize_bounds(original);

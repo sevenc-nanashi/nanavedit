@@ -1,4 +1,5 @@
 pub(crate) mod effects;
+pub(crate) mod video;
 use crate::timeline::Clip;
 use effects::{EffectProcessor, GpuResources};
 use std::{
@@ -140,6 +141,17 @@ impl Preview {
             .max_texture_dimension_2d
     }
 
+    pub fn max_video_buffer_size(&self) -> u64 {
+        self.native
+            .gpu
+            .borrow()
+            .as_ref()
+            .expect("live preview owns a GPU")
+            .device
+            .limits()
+            .max_storage_buffer_binding_size
+    }
+
     pub fn register_image(&self, id: u64, image: RgbaImage) -> Result<()> {
         ensure!(
             !self.native.failed.load(Ordering::Relaxed),
@@ -164,6 +176,16 @@ impl Preview {
                 self.native.invalidate();
             }
         }
+    }
+
+    pub fn prepare_video(
+        &self,
+        frames: &[(video::Key, Arc<crate::input::frame::Frame>)],
+        objects: HashMap<u64, video::Key>,
+    ) -> Result<()> {
+        let mut gpu = self.native.gpu.borrow_mut();
+        let gpu = gpu.as_mut().context("描画ウィンドウが閉じられています")?;
+        gpu.videos.prepare(&gpu.resources, frames, objects)
     }
 
     pub fn retain_images(&self, retained: &HashSet<u64>) {
@@ -314,6 +336,7 @@ unsafe extern "system" fn window_proc(
 }
 
 struct Gpu {
+    videos: video::VideoTextures,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -457,6 +480,7 @@ impl Gpu {
         config.width = 0;
         config.height = 0;
         Ok(Self {
+            videos: video::VideoTextures::new(&device),
             surface,
             device: device.clone(),
             queue: queue.clone(),

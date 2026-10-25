@@ -484,6 +484,15 @@ impl Editor {
             .when_some(clip.image(), |element, image| {
                 element.child(format!("{} × {} px", image.width, image.height))
             })
+            .when_some(clip.video(), |element, video| {
+                element
+                    .child(format!(
+                        "{} × {} px / {}/{} fps",
+                        video.width, video.height, video.rate, video.scale
+                    ))
+                    .child(format!("入力: {}（音声再生なし）", video.plugin))
+                    .child(format!("素材開始: {} フレーム", clip.source_start))
+            })
             .child(format!("レイヤー {}", clip.layer + 1))
             .child(format!("開始: {} フレーム", clip.start))
             .child(format!(

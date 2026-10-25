@@ -1,4 +1,6 @@
 use crate::{editor::Editor, theme::Base16Scheme, timeline::ObjectKind};
+#[cfg(windows)]
+mod input_ui;
 use anyhow::{Context as _, Result, ensure};
 use gpui::{
     App, AppContext, Context, FocusHandle, Global, IntoElement, Render, Window, WindowHandle, div,
@@ -131,13 +133,14 @@ pub fn initialize(cx: &mut App) {
     cx.on_window_closed(|cx, id| {
         let state = cx.global_mut::<SettingsState>();
         if state.editor.is_some_and(|window| window.window_id() == id) {
-            cx.quit();
+            state.editor = None;
+            quit(cx);
         } else {
             if state.window.is_some_and(|window| window.window_id() == id) {
                 state.window = None;
             }
             if cx.windows().is_empty() {
-                cx.quit();
+                quit(cx);
             }
         }
     })
@@ -147,6 +150,13 @@ pub fn initialize(cx: &mut App) {
     } else {
         open(cx);
     }
+}
+
+fn quit(cx: &mut App) {
+    #[cfg(windows)]
+    crate::input::quit(cx);
+    #[cfg(not(windows))]
+    cx.quit();
 }
 
 pub fn open(cx: &mut App) {
@@ -367,6 +377,10 @@ impl Render for SettingsWindow {
             .when_some(self.error.as_ref(), |content, error| {
                 content.child(div().text_color(theme.colors.danger).child(error.clone()))
             });
+        #[cfg(windows)]
+        {
+            content = content.child(self.input_plugins(cx));
+        }
         div()
             .id("app-settings")
             .track_focus(&self.focus)

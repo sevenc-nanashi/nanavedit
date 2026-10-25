@@ -1,6 +1,9 @@
 mod editor;
 pub mod effects;
 #[cfg(target_os = "windows")]
+mod input;
+mod media;
+#[cfg(target_os = "windows")]
 mod preview;
 mod settings;
 mod theme;
@@ -14,6 +17,8 @@ fn main() {
         .run(|cx| {
             effects::definitions();
             gpui_kit::install(cx);
+            #[cfg(target_os = "windows")]
+            input::install(cx);
             settings::initialize(cx);
             cx.activate(true);
         });
