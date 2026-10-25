@@ -2,6 +2,7 @@ use super::*;
 use crate::effects::camera::CameraParams;
 use crate::effects::{EffectInstance, FileAsset, Param};
 use crate::timeline::ObjectKind;
+use anyhow::{Context as _, bail};
 use wgpu::util::DeviceExt;
 #[path = "transform.rs"]
 mod transform;
@@ -22,7 +23,7 @@ pub(super) struct GpuResources {
     pub used_sizes: HashSet<(u32, u32)>,
 }
 
-pub(super) fn depends_on_time(objects: &[Clip]) -> bool {
+pub fn depends_on_time(objects: &[Clip]) -> bool {
     let mut has_input = false;
     for object in objects {
         match object.kind {
@@ -218,7 +219,7 @@ pub(super) fn create_pipeline(
         multiview_mask: None,
         cache: None,
     });
-    if let Some(error) = gpui::block_on(scope.pop()) {
+    if let Some(error) = pollster::block_on(scope.pop()) {
         bail!("{label}: {error}");
     }
     Ok(pipeline)
@@ -616,7 +617,7 @@ impl GpuResources {
     }
 }
 
-impl Gpu {
+impl Renderer {
     fn evaluate(
         &mut self,
         source: Option<Source>,
@@ -677,10 +678,12 @@ impl Gpu {
     pub(super) fn render_objects(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
+        objects: &[Clip],
+        frame: u64,
         view: &wgpu::TextureView,
-        width: u32,
-        height: u32,
+        size: (u32, u32),
     ) -> Result<()> {
+        let (width, height) = size;
         // shortcut: pool sizes follow this evaluation; add a global budget for large projects.
         self.resources.used_sizes.clear();
         let (scene_width, scene_height) = SCENE_SIZE;
@@ -703,10 +706,10 @@ impl Gpu {
         let mut pending: Option<RenderItem> = None;
         let mut segment = Vec::new();
         let mut active_camera: Option<(u64, usize, CameraParams)> = None;
-        for object in self.visible.clone() {
+        for object in objects {
             let context = EvaluationContext {
-                object: &object,
-                scene_frame: self.frame,
+                object,
+                scene_frame: frame,
                 screen_size: SCENE_SIZE,
             };
             match &object.kind {

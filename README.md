@@ -17,6 +17,53 @@ mise exec rust@1.99.0 -- cargo run --locked
 
 gpui-box関連の依存は同じ`v0.2.0`に固定しています。
 
+## クレート構成
+
+Cargo workspaceで次の3クレートに分割しています。ルートは仮想ワークスペースです。`cargo run --locked`は既定メンバーの`nanavedit-app`を起動し、実行ファイル名は`nanavedit`を維持します。
+
+| クレート | 責務 |
+| --- | --- |
+| `nanavedit-app`（`crates/nanavedit-app`） | GPUI、編集状態・Undo／Redo、設定、プレビューウィンドウ、非同期処理の起動・終了 |
+| `nanavedit-engine`（`crates/nanavedit-engine`） | オブジェクト・エフェクト定義、フレーム評価、カメラ、GPU合成・動画テクスチャキャッシュ |
+| `nanavedit-media`（`crates/nanavedit-media`） | 素材型、画像読み込み、AviUtl2入力プラグイン、動画デコード・CPUキャッシュ |
+
+依存方向は`app → engine → media`と`app → media`です。engineとmediaはGPUIに依存しません。
+`Timeline`の選択・ズーム・再生時計・履歴はアプリに残し、`Document::active_objects(frame)`で
+指定フレームの有効オブジェクトをレイヤー順に取り出します。GPU描画と入力プラグインはWindows専用です。
+
+### ウィンドウなしで描画する
+
+利用側でDX12の`wgpu::Instance`を作り、`compatible_surface: None`でアダプターを取得します。
+アプリと同様にCPUアダプターは拒否し、DeviceとQueueを作成します。
+`Renderer::new(device.clone(), queue.clone(), format)`へ渡すフォーマットは、出力テクスチャと一致させてください。
+出力には`RENDER_ATTACHMENT`、読み戻す場合は`COPY_SRC`も指定します。`Rgba16Float`での出力も可能です。
+
+画像は`nanavedit_media::load_image`で読み込み、`Renderer::register_image`に素材IDとともに登録します。
+動画はmediaの`Registry::new()`でレジストリと検索完了通知の送信側を取得し、`scan`に
+プラグインディレクトリ・設定ディレクトリ・フォント名を渡します。検索はブロッキング処理です。
+成否にかかわらず`scanning`を`false`へReleaseストアし、送信側で完了を通知してから結果を扱います。
+この通知により、検索中に要求された`shutdown().await`も終了を待てます。
+素材は`Registry::open(path, gpu_limits, FPS).await`で開き、`FileAsset`としてオブジェクトに設定します。
+
+```rust,ignore
+use nanavedit_engine::render::video::decode_frames;
+
+let objects = document.active_objects(frame);
+let prepared = decode_frames(&objects, frame, generation.clone(), expected_generation).await?;
+renderer.prepare_video(&prepared.frames, prepared.objects)?;
+renderer.render(&objects, frame, &target_view, (1920, 1080))?;
+```
+
+`generation`は呼び出し側で保持する`Arc<AtomicU64>`です。要求を取り消すときは世代を進め、
+非同期処理が返った後にも世代を比較して古い結果を破棄します。動画のないシーンでも`decode_frames`は空の結果を返します。
+描画はGPUコマンドの送信まで行い、GPUの完了待ち・読み戻し・Surfaceへの表示は呼び出し側で行います。
+シーンは1920×1080・30fps、出力は黒背景合成で、出力サイズに合わせて縦横比を維持します。
+Deviceのエラー／喪失コールバックも呼び出し側で設定し、失敗後は描画を停止してください。
+プラグイン利用終了時は`Registry::shutdown().await`でワーカーとDLLの終了を待ちます。
+
+将来のスクリプト実行は、engineの`EffectProcessor`・`ProcessContext`を利用する別クレートを追加し、
+アプリ側で接続します。現在は既存の静的エフェクト登録を維持し、空のスクリプトクレートは作成していません。
+
 ## 現在の画面
 
 - Base16テーマ（初期値はDefault Dark）、日本語表示、OS標準タイトルバー
@@ -160,8 +207,8 @@ AviUtl2 2.1.14の別プロジェクトで、通常投影距離1024、中心の�
 
 ### Rustでエフェクトを追加する
 
-`src/effects.rs` の登録一覧が、入力追加メニュー・エフェクト追加メニュー・設定UI・評価の定義元です。
-`src/effects/` に定義と処理を追加し、モジュール宣言と `definitions()` の一覧に登録します。
+`crates/nanavedit-engine/src/effects.rs` の登録一覧が、入力追加メニュー・エフェクト追加メニュー・設定UI・評価の定義元です。
+`crates/nanavedit-engine/src/effects/` に定義と処理を追加し、モジュール宣言と `definitions()` の一覧に登録します。
 エディターや評価ループに種類IDの分岐を追加する必要はありません。
 既存の実装は `image.rs`（画像入力）、`opacity.rs`（描画属性）、`invert.rs`（GPU画像処理）を参照してください。
 
@@ -179,7 +226,7 @@ AviUtl2 2.1.14の別プロジェクトで、通常投影距離1024、中心の�
 種類ID・パラメーターIDの重複、型と範囲の不整合、範囲外の既定値は起動時にエラーにします。
 
 例えば小数と真偽値を持つ処理は、次のように定義できます（追加例であり、組み込みには含めていません）。
-`src/effects/gain.rs` に置き、`src/effects.rs` に `mod gain;` と `gain::definition()` の登録を追加します。
+`crates/nanavedit-engine/src/effects/gain.rs` に置き、`crates/nanavedit-engine/src/effects.rs` に `mod gain;` と `gain::definition()` の登録を追加します。
 
 ```rust
 use super::*;
@@ -330,9 +377,9 @@ macOS／Linuxでも未選択の画像・動画ファイルオブジェクトは�
 実用プラグイン全般、VFR・複数トラック、半透明画素の数値精度、キャッシュ上限付近での負荷は未検証です。
 
 ```sh
-mise exec rust@1.99.0 -- cargo fmt
-mise exec rust@1.99.0 -- cargo check --locked
-mise exec rust@1.99.0 -- cargo clippy --locked --all-targets -- -D warnings
+mise exec rust@1.99.0 -- cargo fmt --all
+mise exec rust@1.99.0 -- cargo check --workspace --locked
+mise exec rust@1.99.0 -- cargo clippy --workspace --locked --all-targets -- -D warnings
 ```
 
 起動後は日本語表示、境界のドラッグ・キーボード操作、最小サイズと最大化、
@@ -364,3 +411,9 @@ GPUメモリ負荷は未検証です。
 標準描画・カメラ制御はWindowsで起動と設定パネル、画像プレビューの表示を確認しています。
 数値直接入力の確定・取消・Undoの全経路、カメラと既存エフェクトの全組み合わせ、
 大量の交差面を含むシーンの性能は未検証です。
+
+クレート分割後はWindows／RTX 3050で、GPUI・HWNDなしの画像・動画・カメラ・色反転の合成、
+空フレーム・画像・色反転のピクセル値、動画シーク・古い要求の取消・読み込み失敗後の素材保持、
+AviReader入力プラグインの終了を確認しています。相対パスでのプラグイン検索も確認済みです。
+アプリでは起動・オブジェクト追加・移動・Undo／Redo・右端トリム・最大ズーム・終了を確認しました。
+分割後のUI経由の画像読み込み・動画再生、macOS／Linuxのビルド・実機動作は未検証です。

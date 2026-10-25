@@ -1,0 +1,15 @@
+[package]
+name = "nanavedit-media"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+async-channel.workspace = true
+aviutl2-sys.workspace = true
+image.workspace = true
+windows.workspace = true

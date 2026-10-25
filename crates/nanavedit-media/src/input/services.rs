@@ -14,9 +14,9 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn new(path: &Path) -> Box<Self> {
+    pub fn new(path: &Path, font_name: &str) -> Box<Self> {
         let path = super::wide(path.as_os_str());
-        let font_name = super::wide(std::ffi::OsStr::new(crate::editor::UI_FONT));
+        let font_name = super::wide(std::ffi::OsStr::new(font_name));
         let font = FONT_INFO {
             name: font_name.as_ptr(),
             size: 13.0,

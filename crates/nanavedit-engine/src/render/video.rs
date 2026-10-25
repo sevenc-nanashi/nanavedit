@@ -14,7 +14,7 @@ struct Cached {
     source: Source,
     bytes: usize,
 }
-pub struct VideoTextures {
+pub(super) struct VideoTextures {
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     entries: VecDeque<Cached>,
@@ -203,4 +203,59 @@ impl VideoTextures {
         self.objects = objects;
         Ok(())
     }
+}
+
+/// Decode a complete frame before replacing the scene shown by the caller.
+pub async fn decode_frames(
+    objects: &[crate::timeline::Clip],
+    frame: u64,
+    current: Arc<std::sync::atomic::AtomicU64>,
+    generation: u64,
+) -> Result<PreparedVideo> {
+    let videos: Vec<_> = objects
+        .iter()
+        .filter_map(|clip| {
+            let crate::timeline::ObjectKind::Input { input, .. } = &clip.kind else {
+                return None;
+            };
+            if !input.enabled {
+                return None;
+            }
+            clip.video().map(|video| {
+                (
+                    clip.id,
+                    video.clone(),
+                    clip.source_start + frame - clip.start,
+                )
+            })
+        })
+        .collect();
+    let mut decoded = Vec::new();
+    let mut bindings = HashMap::new();
+    for (object, video, time) in videos {
+        let data = video
+            .read(time, crate::timeline::FPS, current.clone(), generation)
+            .await?;
+        let key = (video.id, data.number);
+        bindings.insert(object, key);
+        if !decoded.iter().any(|(existing, _)| *existing == key) {
+            decoded.push((key, data));
+        }
+    }
+    Ok(PreparedVideo {
+        frames: decoded,
+        objects: bindings,
+    })
+}
+
+pub struct PreparedVideo {
+    pub frames: Vec<(Key, Arc<Frame>)>,
+    pub objects: HashMap<u64, Key>,
+}
+
+pub fn has_video(objects: &[crate::timeline::Clip]) -> bool {
+    objects.iter().any(|clip| {
+        matches!(&clip.kind, crate::timeline::ObjectKind::Input { input, .. } if input.enabled)
+            && clip.video().is_some()
+    })
 }

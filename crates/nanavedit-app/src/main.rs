@@ -1,8 +1,7 @@
 mod editor;
-pub mod effects;
+use nanavedit_engine::effects;
 #[cfg(target_os = "windows")]
 mod input;
-mod media;
 #[cfg(target_os = "windows")]
 mod preview;
 mod settings;

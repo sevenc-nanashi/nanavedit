@@ -1,0 +1,15 @@
+[package]
+name = "nanavedit-engine"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+[dependencies]
+nanavedit-media.workspace = true
+anyhow.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wgpu.workspace = true
+pollster.workspace = true
+image.workspace = true

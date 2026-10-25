@@ -1,9 +1,8 @@
 pub mod frame;
 mod services;
-use crate::media::VideoAsset;
+use crate::VideoAsset;
 use anyhow::{Context as _, Result, bail, ensure};
 use aviutl2_sys::{cache2::CACHE_HANDLE, config2::CONFIG_HANDLE, input2::*, logger2::LOG_HANDLE};
-use gpui::Global;
 use std::{
     collections::{HashMap, VecDeque},
     ffi::OsStr,
@@ -27,11 +26,6 @@ use windows::{
 const VERSION: u32 = 2_011_400;
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 type Reply<T> = async_channel::Sender<Result<T>>;
-pub fn directory() -> Result<PathBuf> {
-    Ok(dirs::config_dir()
-        .context("設定フォルダーを取得できません")?
-        .join("nanavedit/Plugin"))
-}
 fn wide(value: &OsStr) -> Vec<u16> {
     value.encode_wide().chain([0]).collect()
 }
@@ -54,8 +48,6 @@ pub struct Registry {
     scanned: async_channel::Receiver<()>,
     cache: Arc<Mutex<FrameCache>>,
 }
-pub struct InputPlugins(pub Arc<Registry>);
-impl Global for InputPlugins {}
 #[derive(Clone)]
 pub struct Entry {
     pub path: PathBuf,
@@ -81,8 +73,8 @@ impl Drop for Lease {
     }
 }
 enum Command {
-    Open(PathBuf, (u32, u64), Client, Reply<Opened>),
-    Read(u64, u64, Arc<AtomicU64>, u64, Reply<Arc<frame::Frame>>),
+    Open(PathBuf, (u32, u64), u64, Client, Reply<Opened>),
+    Read(u64, u64, u64, Arc<AtomicU64>, u64, Reply<Arc<frame::Frame>>),
     Close(u64),
     Configure(usize, Reply<()>),
     Shutdown(Reply<()>),
@@ -140,64 +132,28 @@ impl FrameCache {
     }
 }
 
-pub fn install(cx: &mut gpui::App) {
-    let (finished, scanned) = async_channel::bounded(1);
-    cx.set_quit_mode(gpui::QuitMode::Explicit);
-    let registry = Arc::new(Registry {
-        entries: Mutex::new(Vec::new()),
-        scanning: true.into(),
-        stopping: false.into(),
-        scanned,
-        cache: Arc::new(Mutex::new(FrameCache {
-            entries: VecDeque::new(),
-            bytes: 0,
-        })),
-    });
-    cx.set_global(InputPlugins(registry.clone()));
-    let shutdown = registry.clone();
-    cx.on_app_quit(move |_| {
-        let registry = shutdown.clone();
-        async move {
-            registry.shutdown().await;
-        }
-    })
-    .detach();
-    let task = cx.background_executor().spawn(async move {
-        let result = registry.scan();
-        if let Err(error) = result {
-            registry.entries.lock().expect("registry lock").push(Entry {
-                path: PathBuf::new(),
-                name: "プラグイン検索".into(),
-                filters: String::new(),
-                error: Some(format!("{error:#}")),
-                client: None,
-            });
-        }
-        registry.scanning.store(false, Ordering::Release);
-        let _ = finished.try_send(());
-    });
-    cx.spawn(async move |cx| {
-        task.await;
-        cx.update(|cx| cx.refresh_windows());
-    })
-    .detach();
-}
-
-pub fn quit(cx: &mut gpui::App) {
-    let registry = cx.global::<InputPlugins>().0.clone();
-    if registry.stopping.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    // Wait before App::quit, whose observer deadline is too short for native decoders.
-    cx.spawn(async move |cx| {
-        registry.shutdown().await;
-        cx.update(|cx| cx.quit());
-    })
-    .detach();
-}
-
 impl Registry {
-    fn scan(&self) -> Result<()> {
+    /// The caller runs `scan` in a worker, clears `scanning`, then signals completion.
+    pub fn new() -> (Arc<Self>, async_channel::Sender<()>) {
+        let (finished, scanned) = async_channel::bounded(1);
+        let registry = Arc::new(Self {
+            entries: Mutex::new(Vec::new()),
+            scanning: true.into(),
+            stopping: false.into(),
+            scanned,
+            cache: Arc::new(Mutex::new(FrameCache {
+                entries: VecDeque::new(),
+                bytes: 0,
+            })),
+        });
+        (registry, finished)
+    }
+
+    pub fn begin_shutdown(&self) -> bool {
+        !self.stopping.swap(true, Ordering::AcqRel)
+    }
+
+    pub fn scan(&self, directory: &Path, config_directory: &Path, font_name: &str) -> Result<()> {
         fn visit(path: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
             for entry in std::fs::read_dir(path)? {
                 let entry = entry?;
@@ -217,8 +173,9 @@ impl Registry {
             }
             Ok(())
         }
-        let directory = directory()?;
-        std::fs::create_dir_all(&directory)?;
+        std::fs::create_dir_all(directory)?;
+        let directory = directory.canonicalize()?;
+        let config_directory = config_directory.canonicalize()?;
         let mut paths = Vec::new();
         visit(&directory, &mut paths)?;
         paths.sort();
@@ -232,11 +189,13 @@ impl Registry {
             let count = opened.clone();
             let cache = self.cache.clone();
             let dll = path.clone();
+            let config_directory = config_directory.to_owned();
+            let font_name = font_name.to_owned();
             std::thread::Builder::new()
                 .name("aui2 input".into())
                 .spawn(move || {
                     let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-                    let loaded = Plugin::load(&dll);
+                    let loaded = Plugin::load(&dll, &config_directory, &font_name);
                     let shutdown = match loaded {
                         Ok(mut plugin) => {
                             let _ = ready.send(Ok((
@@ -289,7 +248,12 @@ impl Registry {
         Ok(())
     }
 
-    pub async fn open(&self, path: PathBuf, limit: (u32, u64)) -> Result<Arc<VideoAsset>> {
+    pub async fn open(
+        &self,
+        path: PathBuf,
+        limit: (u32, u64),
+        fps: u64,
+    ) -> Result<Arc<VideoAsset>> {
         ensure!(
             !self.scanning.load(Ordering::Acquire),
             "入力プラグインを検索中です"
@@ -308,9 +272,13 @@ impl Registry {
                 continue;
             }
             let (reply, result) = async_channel::bounded(1);
-            client
-                .sender
-                .send(Command::Open(path.clone(), limit, client.clone(), reply))?;
+            client.sender.send(Command::Open(
+                path.clone(),
+                limit,
+                fps,
+                client.clone(),
+                reply,
+            ))?;
             match result.recv().await? {
                 Ok(opened) => {
                     return Ok(Arc::new(VideoAsset {
@@ -369,14 +337,14 @@ impl VideoAsset {
     pub async fn read(
         &self,
         time: u64,
+        fps: u64,
         generation: Arc<AtomicU64>,
         expected: u64,
     ) -> Result<Arc<frame::Frame>> {
         let (reply, result) = async_channel::bounded(1);
-        self.lease
-            .client
-            .sender
-            .send(Command::Read(self.id, time, generation, expected, reply))?;
+        self.lease.client.sender.send(Command::Read(
+            self.id, time, fps, generation, expected, reply,
+        ))?;
         result.recv().await?
     }
 }
@@ -407,9 +375,8 @@ impl Plugin {
     fn symbol(&self, name: &'static [u8]) -> Option<unsafe extern "system" fn() -> isize> {
         unsafe { GetProcAddress(self.module, PCSTR(name.as_ptr())) }
     }
-    fn load(path: &Path) -> Result<Self> {
-        let base = directory()?.parent().expect("plugin parent").to_path_buf();
-        let config = services::Config::new(&base);
+    fn load(path: &Path, base: &Path, font_name: &str) -> Result<Self> {
+        let config = services::Config::new(base, font_name);
         let logger = services::Logger::new(&base.join("input-plugins.log"))?;
         let filename = wide(path.as_os_str());
         let module = unsafe {
@@ -514,7 +481,7 @@ impl Plugin {
         Ok(plugin)
     }
 
-    fn open(&self, path: &Path, limit: (u32, u64)) -> Result<Session> {
+    fn open(&self, path: &Path, limit: (u32, u64), fps: u64) -> Result<Session> {
         let table = self.table();
         let path = wide(path.as_os_str());
         let handle = unsafe { table.func_open.expect("validated open")(path.as_ptr()) };
@@ -540,8 +507,8 @@ impl Plugin {
                 info.rate > 0 && info.scale > 0 && info.n > 0,
                 "フレーム数またはフレームレートが不正です"
             );
-            let duration = (info.n as u128 * info.scale as u128 * u128::from(crate::timeline::FPS))
-                .div_ceil(info.rate as u128);
+            let duration =
+                (info.n as u128 * info.scale as u128 * u128::from(fps)).div_ceil(info.rate as u128);
             ensure!(
                 duration <= u128::from(u64::MAX),
                 "素材の長さがタイムラインの上限を超えています"
@@ -580,14 +547,15 @@ impl Plugin {
         session: &Session,
         id: u64,
         time: u64,
+        fps: u64,
         cache: &Mutex<FrameCache>,
     ) -> Result<Arc<frame::Frame>> {
         let table = self.table();
         let number = if let Some(time_to_frame) = session.time_to_frame {
-            time_to_frame(session.handle, time as f64 / crate::timeline::FPS as f64)
+            time_to_frame(session.handle, time as f64 / fps as f64)
         } else {
             ((u128::from(time) * u128::from(session.rate))
-                / (u128::from(crate::timeline::FPS) * u128::from(session.scale))) as i32
+                / (u128::from(fps) * u128::from(session.scale))) as i32
         };
         ensure!(
             (0..session.frames).contains(&number),
@@ -633,10 +601,10 @@ impl Plugin {
         let mut shutdown = None;
         while let Ok(command) = commands.recv() {
             match command {
-                Command::Open(path, limit, client, reply) => {
-                    let result = self.open(&path, limit).and_then(|session| {
+                Command::Open(path, limit, fps, client, reply) => {
+                    let result = self.open(&path, limit, fps).and_then(|session| {
                         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-                        if let Err(error) = self.read(&session, id, 0, &cache) {
+                        if let Err(error) = self.read(&session, id, 0, fps, &cache) {
                             self.table().func_close.expect("validated close")(session.handle);
                             return Err(error);
                         }
@@ -653,14 +621,14 @@ impl Plugin {
                     });
                     let _ = reply.try_send(result);
                 }
-                Command::Read(id, time, generation, expected, reply) => {
+                Command::Read(id, time, fps, generation, expected, reply) => {
                     let result = if generation.load(Ordering::Acquire) != expected {
                         Err(anyhow::anyhow!("古いフレーム要求"))
                     } else {
                         sessions
                             .get(&id)
                             .context("素材は閉じられています")
-                            .and_then(|session| self.read(session, id, time, &cache))
+                            .and_then(|session| self.read(session, id, time, fps, &cache))
                     };
                     let _ = reply.try_send(result);
                 }

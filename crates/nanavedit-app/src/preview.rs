@@ -1,12 +1,11 @@
-pub(crate) mod effects;
-pub(crate) mod video;
 use crate::timeline::Clip;
-use effects::{EffectProcessor, GpuResources};
+pub(crate) use nanavedit_engine::render::video;
+use nanavedit_engine::render::{Renderer, depends_on_time};
+pub use nanavedit_media::load_image;
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     num::NonZeroIsize,
-    path::Path,
     rc::Rc,
     sync::{
         Arc, OnceLock,
@@ -16,7 +15,7 @@ use std::{
 
 use anyhow::{Context as _, Result, bail, ensure};
 use gpui::{PlatformViewHandle, Window};
-use image::{ImageDecoder as _, ImageFormat, ImageReader, RgbaImage};
+use image::RgbaImage;
 use raw_window_handle::{
     HasWindowHandle, RawDisplayHandle, RawWindowHandle, Win32WindowHandle, WindowsDisplayHandle,
 };
@@ -32,29 +31,6 @@ use windows::{
     },
     core::w,
 };
-
-pub fn load_image(path: &Path, max_dimension: u32) -> Result<RgbaImage> {
-    let mut reader = ImageReader::open(path)?.with_guessed_format()?;
-    ensure!(
-        matches!(reader.format(), Some(ImageFormat::Png | ImageFormat::Jpeg)),
-        "PNGまたはJPEG画像を選択してください"
-    );
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(max_dimension);
-    limits.max_image_height = Some(max_dimension);
-    limits.max_alloc = Some(256 * 1024 * 1024);
-    reader.limits(limits.clone());
-    let mut decoder = reader.into_decoder()?;
-    // Reserve decoded, orientation-copy and RGBA buffers before any pixel allocation.
-    limits.reserve(decoder.total_bytes() * 2)?;
-    let (width, height) = decoder.dimensions();
-    limits.reserve(u64::from(width) * u64::from(height) * 4)?;
-    decoder.set_limits(limits)?;
-    let orientation = decoder.orientation()?;
-    let mut image = image::DynamicImage::from_decoder(decoder)?;
-    image.apply_orientation(orientation);
-    Ok(image.into_rgba8())
-}
 
 pub struct Preview {
     pub handle: PlatformViewHandle,
@@ -162,6 +138,7 @@ impl Preview {
             .borrow_mut()
             .as_mut()
             .context("描画ウィンドウが閉じられています")?
+            .renderer
             .register_image(id, image)?;
         Ok(())
     }
@@ -169,7 +146,7 @@ impl Preview {
     pub fn set_objects(&self, objects: Vec<Clip>, frame: u64) {
         let mut gpu = self.native.gpu.borrow_mut();
         if let Some(gpu) = gpu.as_mut() {
-            let time_changed = gpu.frame != frame && effects::depends_on_time(&objects);
+            let time_changed = gpu.frame != frame && depends_on_time(&objects);
             gpu.frame = frame;
             if gpu.visible != objects || time_changed {
                 gpu.visible = objects;
@@ -185,13 +162,13 @@ impl Preview {
     ) -> Result<()> {
         let mut gpu = self.native.gpu.borrow_mut();
         let gpu = gpu.as_mut().context("描画ウィンドウが閉じられています")?;
-        gpu.videos.prepare(&gpu.resources, frames, objects)
+        gpu.renderer.prepare_video(frames, objects)
     }
 
     pub fn retain_images(&self, retained: &HashSet<u64>) {
         // shortcut: history keeps images resident; add an eviction budget for large projects.
         if let Some(gpu) = self.native.gpu.borrow_mut().as_mut() {
-            gpu.resources.images.retain(|id, _| retained.contains(id));
+            gpu.renderer.retain_images(retained);
         }
     }
 }
@@ -336,13 +313,11 @@ unsafe extern "system" fn window_proc(
 }
 
 struct Gpu {
-    videos: video::VideoTextures,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    resources: GpuResources,
-    processors: HashMap<&'static str, Box<dyn EffectProcessor>>,
+    renderer: Renderer,
     visible: Vec<Clip>,
     frame: u64,
 }
@@ -407,139 +382,19 @@ impl Gpu {
             .context("描画Surfaceに対応していません")?;
         config.format = format;
         config.present_mode = wgpu::PresentMode::Fifo;
-        let image_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("effect image"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let params_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("effect params"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-        let pipeline = effects::create_pipeline(
-            &device,
-            [&image_layout, &params_layout],
-            "composite / present",
-            (
-                include_str!("preview/vertex.wgsl"),
-                include_str!("preview.wgsl"),
-            ),
-            format,
-            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-        )?;
-        let effect_pipeline = effects::create_pipeline(
-            &device,
-            [&image_layout, &params_layout],
-            "composite",
-            (
-                include_str!("preview/vertex.wgsl"),
-                include_str!("preview.wgsl"),
-            ),
-            wgpu::TextureFormat::Rgba16Float,
-            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-        )?;
-        let object_pipeline = effects::create_pipeline(
-            &device,
-            [&image_layout, &params_layout],
-            "standard draw",
-            (include_str!("preview/object.wgsl"), ""),
-            wgpu::TextureFormat::Rgba16Float,
-            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-        )?;
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
+        let renderer = Renderer::new(device.clone(), queue.clone(), format)?;
         // Zero marks the surface as unconfigured until GPUI allocates its physical size.
         config.width = 0;
         config.height = 0;
         Ok(Self {
-            videos: video::VideoTextures::new(&device),
             surface,
-            device: device.clone(),
-            queue: queue.clone(),
+            device,
+            queue,
             config,
-            resources: GpuResources {
-                device,
-                queue,
-                pipeline,
-                effect_pipeline,
-                object_pipeline,
-                image_layout,
-                params_layout,
-                sampler,
-                scratch: Vec::new(),
-                used_sizes: HashSet::new(),
-                images: HashMap::new(),
-            },
-            processors: HashMap::new(),
+            renderer,
             visible: Vec::new(),
             frame: 0,
         })
-    }
-
-    fn register_image(&mut self, id: u64, image: RgbaImage) -> Result<()> {
-        let (width, height) = image.dimensions();
-        let limit = self.device.limits().max_texture_dimension_2d;
-        ensure!(
-            width > 0 && height > 0 && width <= limit && height <= limit,
-            "画像サイズがGPUの上限（{limit}px）を超えています"
-        );
-        let size = wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        };
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("preview image"),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        self.queue.write_texture(
-            texture.as_image_copy(),
-            &image,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 4),
-                rows_per_image: Some(height),
-            },
-            size,
-        );
-        let view = texture.create_view(&Default::default());
-        let source = self.resources.source(view, width, height, false);
-        self.resources.images.insert(id, source);
-        Ok(())
     }
 
     fn draw(&mut self, width: u32, height: u32) -> Result<()> {
@@ -573,9 +428,8 @@ impl Gpu {
             _ => bail!("描画Surfaceを取得できませんでした"),
         };
         let view = frame.texture.create_view(&Default::default());
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        self.render_objects(&mut encoder, &view, width, height)?;
-        self.queue.submit([encoder.finish()]);
+        self.renderer
+            .render(&self.visible, self.frame, &view, (width, height))?;
         self.queue.present(frame);
         drop(view);
         if reconfigure {

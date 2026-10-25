@@ -98,7 +98,7 @@ impl EffectProcessor for StandardDraw {
         render.alpha *= 1.0 - param(params, "transparency").number() / 100.0;
         render.camera_enabled = param(params, "camera") == ParamValue::Bool(true);
         render.blend = match param(params, "blend") {
-            ParamValue::Choice("normal") => crate::preview::effects::BlendMode::Normal,
+            ParamValue::Choice("normal") => crate::render::effects::BlendMode::Normal,
             _ => unreachable!("registered blend mode"),
         };
         source.ok_or_else(|| anyhow::anyhow!("標準描画の入力画像がありません"))

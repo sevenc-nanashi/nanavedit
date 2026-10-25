@@ -3447,23 +3447,46 @@ dependencies = [
 ]
 
 [[package]]
-name = "nanavedit"
+name = "nanavedit-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-channel",
- "aviutl2-sys",
  "dirs",
  "gpui-box",
  "gpui-box-kit",
  "gpui-box-platform",
  "image",
+ "nanavedit-engine",
+ "nanavedit-media",
  "raw-window-handle",
  "serde",
  "serde_json",
  "serde_yaml_ng",
  "tempfile",
  "wgpu",
+ "windows 0.61.3",
+]
+
+[[package]]
+name = "nanavedit-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "image",
+ "nanavedit-media",
+ "pollster 0.4.0",
+ "wgpu",
+]
+
+[[package]]
+name = "nanavedit-media"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "aviutl2-sys",
+ "image",
  "windows 0.61.3",
 ]
 

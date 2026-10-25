@@ -4,12 +4,9 @@ use crate::{
     timeline::Clip,
 };
 use anyhow::{Context as _, Result};
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
 };
 
 #[derive(Default)]
@@ -54,7 +51,9 @@ impl Editor {
                     .into_iter()
                     .next()
                     .context("ファイルが選択されていません")?;
-                let video = plugins.open(path.clone(), limit).await?;
+                let video = plugins
+                    .open(path.clone(), limit, crate::timeline::FPS)
+                    .await?;
                 Ok(Some((path, video)))
             }
             .await;
@@ -71,7 +70,9 @@ impl Editor {
                                 .iter()
                                 .find(|clip| clip.id == clip_id)
                                 .expect("file target");
-                            let mut available = video.duration().min(u64::MAX - original.start);
+                            let mut available = video
+                                .duration(crate::timeline::FPS)
+                                .min(u64::MAX - original.start);
                             for other in &editor.timeline.document.clips {
                                 if other.id != clip_id
                                     && other.layer == original.layer
@@ -138,25 +139,7 @@ impl Editor {
             return;
         }
         let (objects, frame) = desired;
-        let videos: Vec<_> = objects
-            .iter()
-            .filter_map(|clip| {
-                let crate::timeline::ObjectKind::Input { input, .. } = &clip.kind else {
-                    return None;
-                };
-                if !input.enabled {
-                    return None;
-                }
-                clip.video().map(|video| {
-                    (
-                        clip.id,
-                        video.clone(),
-                        clip.source_start + frame - clip.start,
-                    )
-                })
-            })
-            .collect();
-        if videos.is_empty() {
+        if !nanavedit_engine::render::video::has_video(&objects) {
             self.preview
                 .as_ref()
                 .expect("live preview")
@@ -167,19 +150,9 @@ impl Editor {
         self.video_state.busy = true;
         let current = self.video_state.generation.clone();
         cx.spawn(async move |this, cx| {
-            let result: Result<_> = async {
-                let mut decoded = Vec::new();
-                let mut bindings = HashMap::new();
-                for (object, video, time) in videos {
-                    let data = video.read(time, current.clone(), generation).await?;
-                    let key = (video.id, data.number);
-                    bindings.insert(object, key);
-                    if !decoded.iter().any(|(existing, _)| *existing == key) {
-                        decoded.push((key, data));
-                    }
-                }
-                Ok((decoded, bindings))
-            }
+            let result = nanavedit_engine::render::video::decode_frames(
+                &objects, frame, current, generation,
+            )
             .await;
             let _ = this.update(cx, |editor, cx| {
                 editor.video_state.busy = false;
@@ -188,8 +161,9 @@ impl Editor {
                 {
                     editor.video_state.presented = generation;
                     let preview = editor.preview.as_ref().expect("live preview");
-                    let result = result
-                        .and_then(|(decoded, bindings)| preview.prepare_video(&decoded, bindings));
+                    let result = result.and_then(|prepared| {
+                        preview.prepare_video(&prepared.frames, prepared.objects)
+                    });
                     match result {
                         Ok(()) => {
                             preview.set_objects(objects, frame);

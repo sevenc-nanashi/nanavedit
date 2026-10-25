@@ -13,7 +13,7 @@ mod standard_draw;
 mod video;
 
 #[cfg(target_os = "windows")]
-pub use crate::preview::effects::{EffectProcessor, ProcessContext, RenderParams, Source};
+pub use crate::render::effects::{EffectProcessor, ProcessContext, RenderParams, Source};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ParamValue {
