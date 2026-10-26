@@ -1,4 +1,5 @@
 mod editor;
+mod menus;
 mod project;
 use nanavedit_engine::effects;
 #[cfg(target_os = "windows")]
@@ -12,6 +13,7 @@ mod timeline;
 use gpui::AppContext;
 
 fn main() {
+    menus::configure_platform();
     gpui_platform::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(|cx| {

@@ -17,6 +17,13 @@ mise exec rust@1.99.0 -- cargo run --locked
 
 gpui-box関連の依存は同じ`v0.2.0`に固定しています。
 
+メニューの定義とOSごとの表示は`nanavedit-app::menus`にまとめています。
+上部メニューはWindows/macOSでは`muda`によるネイティブメニュー、LinuxではGPUI内の表示を使います。
+コンテキストメニューはgpui-boxのネイティブ表示をWindows/macOSで利用し、LinuxではGPUI内に表示します。
+Windowsのショートカットキー処理は引き続きGPUI側で行います。
+Windowsではネイティブメニューバーを描画するため、起動時に`GPUI_DISABLE_DIRECT_COMPOSITION=1`を設定し、
+GPUIの描画先をDirectCompositionからHWNDのスワップチェーンに切り替えます。GPU描画は維持します。
+
 ## クレート構成
 
 Cargo workspaceで次の3クレートに分割しています。ルートは仮想ワークスペースです。`cargo run --locked`は既定メンバーの`nanavedit-app`を起動し、実行ファイル名は`nanavedit`を維持します。

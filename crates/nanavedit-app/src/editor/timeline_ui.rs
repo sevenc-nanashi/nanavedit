@@ -142,7 +142,7 @@ impl Editor {
             .iter()
             .filter(|definition| definition.info.role == EffectRole::Input)
             .map(|definition| {
-                gpui_kit::prelude::MenuItem::command(
+                crate::menus::MenuItem::command(
                     format!("input:{}", definition.info.id),
                     format!("{}を追加", definition.info.name),
                 )
@@ -150,9 +150,9 @@ impl Editor {
             })
             .collect();
         items.extend([
-            gpui_kit::prelude::MenuItem::command("filter", "フィルタオブジェクトを追加"),
-            gpui_kit::prelude::MenuItem::command("effect", "エフェクトオブジェクトを追加"),
-            gpui_kit::prelude::MenuItem::command("camera", "カメラ制御を追加"),
+            crate::menus::MenuItem::command("filter", "フィルタオブジェクトを追加"),
+            crate::menus::MenuItem::command("effect", "エフェクトオブジェクトを追加"),
+            crate::menus::MenuItem::command("camera", "カメラ制御を追加"),
         ]);
         let result = self.object_menu.update(cx, |menu, cx| {
             menu.set_items(items, window, cx)?;

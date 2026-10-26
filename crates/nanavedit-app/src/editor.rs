@@ -1,11 +1,12 @@
 use crate::effects::{EffectDefinition, EffectInstance, EffectRole};
+use crate::menus::{Command, Menubar};
 use crate::timeline::Timeline;
 use effects_ui::CreationTarget;
 use gpui::{
     Context, CursorStyle, Div, FocusHandle, IntoElement, MouseButton, Point, Render, Window, div,
     prelude::*, px,
 };
-use gpui_kit::prelude::{Button, ControlSize, Disableable, Menubar, MenubarEvent, Sizable};
+use gpui_kit::prelude::{Button, ControlSize, Disableable, Sizable};
 use std::{cell::Cell, rc::Rc};
 mod effects_ui;
 mod project_ui;
@@ -55,9 +56,9 @@ pub struct Editor {
     timeline_bounds: Rc<Cell<gpui::Bounds<gpui::Pixels>>>,
     clip_drag: Option<timeline_ui::Drag>,
     bad_drop: bool,
-    object_menu: gpui::Entity<gpui_kit::prelude::ContextMenu>,
+    object_menu: gpui::Entity<crate::menus::ContextMenu>,
     addition_target: Option<(usize, u64)>,
-    effect_menu: gpui::Entity<gpui_kit::prelude::ContextMenu>,
+    effect_menu: gpui::Entity<crate::menus::ContextMenu>,
     effect_add_target: Option<u64>,
     effect_menu_bounds: Rc<Cell<gpui::Bounds<gpui::Pixels>>>,
     effect_edit: Option<crate::timeline::Document>,
@@ -84,22 +85,21 @@ pub struct Editor {
 
 impl Editor {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let menubar = cx.new(|cx| Menubar::new("editor-menubar", [], window, cx));
-        cx.subscribe_in(&menubar, window, |editor, _, event, window, cx| {
-            if let MenubarEvent::Invoked { item, .. } = event {
-                match item.as_ref() {
-                    "open-project" => editor.open_project(window, cx),
-                    "save-project" => editor.save_project(false, cx),
-                    "save-project-as" => editor.save_project(true, cx),
-                    "project-settings" => {
-                        editor.project_settings_visible = !editor.project_settings_visible;
-                        cx.notify();
-                    }
-                    "app-settings" => crate::settings::open(cx),
-                    _ => unreachable!("unknown menu item"),
+        let menubar = cx.new(|cx| Menubar::new(window, cx));
+        cx.subscribe_in(
+            &menubar,
+            window,
+            |editor, _, event, window, cx| match event {
+                Command::Open => editor.open_project(window, cx),
+                Command::Save => editor.save_project(false, cx),
+                Command::SaveAs => editor.save_project(true, cx),
+                Command::ProjectSettings => {
+                    editor.project_settings_visible = !editor.project_settings_visible;
+                    cx.notify();
                 }
-            }
-        })
+                Command::AppSettings => crate::settings::open(cx),
+            },
+        )
         .detach();
         let editor = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
@@ -148,11 +148,11 @@ impl Editor {
         })
         .detach();
         let object_menu = cx.new(|cx| {
-            gpui_kit::prelude::ContextMenu::new("object-menu", window, cx).name("オブジェクト追加")
+            crate::menus::context_menu("object-menu", window, cx).name("オブジェクト追加")
         });
         cx.subscribe(&object_menu, |editor, _, event, cx| match event {
-            gpui_kit::prelude::ContextMenuEvent::Invoked(id) => editor.add_from_menu(id, cx),
-            gpui_kit::prelude::ContextMenuEvent::Unavailable(error) => {
+            crate::menus::ContextMenuEvent::Invoked(id) => editor.add_from_menu(id, cx),
+            crate::menus::ContextMenuEvent::Unavailable(error) => {
                 editor.preview_error = Some(format!("メニューを表示できません: {error}"));
                 cx.notify();
             }
@@ -164,10 +164,10 @@ impl Editor {
         })
         .detach();
         let effect_menu = cx.new(|cx| {
-            gpui_kit::prelude::ContextMenu::new("effect-menu", window, cx).name("エフェクトを追加")
+            crate::menus::context_menu("effect-menu", window, cx).name("エフェクトを追加")
         });
         cx.subscribe(&effect_menu, |editor, _, event, cx| match event {
-            gpui_kit::prelude::ContextMenuEvent::Invoked(id) => {
+            crate::menus::ContextMenuEvent::Invoked(id) => {
                 let clip_id = editor
                     .effect_add_target
                     .take()
@@ -178,7 +178,7 @@ impl Editor {
                     cx,
                 );
             }
-            gpui_kit::prelude::ContextMenuEvent::Unavailable(error) => {
+            crate::menus::ContextMenuEvent::Unavailable(error) => {
                 editor.preview_error = Some(format!("メニューを表示できません: {error}"));
                 cx.notify();
             }
@@ -747,14 +747,16 @@ impl Render for Editor {
                     editor.effect_drag = None;
                 }),
             )
-            .child(
-                div()
-                    .h(px(HEADER))
-                    .flex_none()
-                    .border_b_1()
-                    .border_color(theme.colors.hairline)
-                    .child(self.menubar.clone()),
-            )
+            .when(crate::menus::HEIGHT > 0.0, |element| {
+                element.child(
+                    div()
+                        .h(px(crate::menus::HEIGHT))
+                        .flex_none()
+                        .border_b_1()
+                        .border_color(theme.colors.hairline)
+                        .child(self.menubar.clone()),
+                )
+            })
             .when(self.project_settings_visible, |element| {
                 element.child(self.project_controls(window, cx))
             })

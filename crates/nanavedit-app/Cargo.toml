@@ -22,8 +22,11 @@ tempfile.workspace = true
 nanavedit-engine.workspace = true
 nanavedit-media.workspace = true
 
-[target.'cfg(target_os = "windows")'.dependencies]
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 async-channel.workspace = true
+muda.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
 image.workspace = true
 raw-window-handle.workspace = true
 wgpu.workspace = true

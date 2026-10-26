@@ -83,9 +83,7 @@ impl Editor {
         let items = crate::effects::definitions()
             .iter()
             .filter(|d| d.info.role == EffectRole::Effect)
-            .map(|d| {
-                gpui_kit::prelude::MenuItem::command(d.info.id, d.info.name).disabled(self.loading)
-            })
+            .map(|d| crate::menus::MenuItem::command(d.info.id, d.info.name).disabled(self.loading))
             .collect();
         let position = self.effect_menu_bounds.get().bottom_left();
         let result = self.effect_menu.update(cx, |menu, cx| {

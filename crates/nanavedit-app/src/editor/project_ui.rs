@@ -1,12 +1,12 @@
 use super::*;
 use crate::{project::Project, timeline::ProjectSettings};
 use anyhow::{Context as _, Result, ensure};
-use gpui_kit::prelude::{MenuItem, MenubarMenu, NumberInput, NumberInputEvent};
+use gpui_kit::prelude::{NumberInput, NumberInputEvent};
 use std::path::PathBuf;
 
 impl Editor {
     pub(super) fn project_header_height(&self) -> f32 {
-        HEADER
+        crate::menus::HEIGHT
             + if self.project_settings_visible {
                 PROJECT_CONTROLS_HEIGHT
             } else {
@@ -15,39 +15,9 @@ impl Editor {
     }
 
     pub(super) fn update_menubar(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let menus = vec![
-            MenubarMenu::new(
-                "file",
-                "ファイル",
-                [
-                    MenuItem::command("open-project", "開く…")
-                        .shortcut("Ctrl+O")
-                        .disabled(self.loading),
-                    MenuItem::command("save-project", "保存")
-                        .shortcut("Ctrl+S")
-                        .disabled(self.loading),
-                    MenuItem::command("save-project-as", "別名保存…")
-                        .shortcut("Ctrl+Shift+S")
-                        .disabled(self.loading),
-                    MenuItem::separator("project-settings-separator"),
-                    MenuItem::check(
-                        "project-settings",
-                        "プロジェクト設定",
-                        self.project_settings_visible,
-                    )
-                    .disabled(self.loading),
-                ],
-            ),
-            MenubarMenu::new(
-                "settings",
-                "設定",
-                [MenuItem::command("app-settings", "アプリ設定…").shortcut("Ctrl+,")],
-            ),
-        ];
-        if self.menubar.read(cx).menus() != menus {
-            self.menubar
-                .update(cx, |menubar, cx| menubar.set_menus(menus, window, cx));
-        }
+        self.menubar.update(cx, |menubar, cx| {
+            menubar.set_state(self.loading, self.project_settings_visible, window, cx);
+        });
     }
 
     pub(super) fn project_controls(
