@@ -5,9 +5,10 @@ use gpui::{
     Context, CursorStyle, Div, FocusHandle, IntoElement, MouseButton, Point, Render, Window, div,
     prelude::*, px,
 };
-use gpui_kit::prelude::{Button, ControlSize, Disableable, Sizable};
+use gpui_kit::prelude::{Button, ControlSize, Disableable, Menubar, MenubarEvent, Sizable};
 use std::{cell::Cell, rc::Rc};
 mod effects_ui;
+mod project_ui;
 mod timeline_ui;
 #[cfg(target_os = "windows")]
 mod video_input;
@@ -18,6 +19,7 @@ use gpui_kit::{
 
 const DIVIDER: f32 = 8.0;
 const HEADER: f32 = 36.0;
+const PROJECT_CONTROLS_HEIGHT: f32 = 64.0;
 const PADDING: f32 = 24.0;
 
 #[cfg(target_os = "windows")]
@@ -34,6 +36,11 @@ enum Panel {
 }
 
 pub struct Editor {
+    menubar: gpui::Entity<Menubar>,
+    project_settings_visible: bool,
+    project_path: Option<std::path::PathBuf>,
+    saved_document: crate::timeline::Document,
+    project_inputs: Vec<gpui::Entity<gpui_kit::prelude::NumberInput>>,
     settings_width: f32,
     timeline_height: f32,
     focus: FocusHandle,
@@ -77,6 +84,61 @@ pub struct Editor {
 
 impl Editor {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let menubar = cx.new(|cx| Menubar::new("editor-menubar", [], window, cx));
+        cx.subscribe_in(&menubar, window, |editor, _, event, window, cx| {
+            if let MenubarEvent::Invoked { item, .. } = event {
+                match item.as_ref() {
+                    "open-project" => editor.open_project(window, cx),
+                    "save-project" => editor.save_project(false, cx),
+                    "save-project-as" => editor.save_project(true, cx),
+                    "project-settings" => {
+                        editor.project_settings_visible = !editor.project_settings_visible;
+                        cx.notify();
+                    }
+                    "app-settings" => crate::settings::open(cx),
+                    _ => unreachable!("unknown menu item"),
+                }
+            }
+        })
+        .detach();
+        let editor = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            editor
+                .update(cx, |editor, cx| {
+                    if editor.loading {
+                        return false;
+                    }
+                    editor.finish_clip_drag(false, cx);
+                    editor.finish_effect_edit(false, cx);
+                    if editor.timeline.document == editor.saved_document {
+                        return true;
+                    }
+                    editor.timeline.playing = None;
+                    editor.loading = true;
+                    let answer = window.prompt(
+                        gpui::PromptLevel::Warning,
+                        "未保存の変更を破棄して終了しますか？",
+                        None,
+                        &["キャンセル", "破棄して終了"],
+                        cx,
+                    );
+                    cx.spawn_in(window, async move |this, cx| {
+                        let discard = matches!(answer.await, Ok(1));
+                        let _ = this.update(cx, |editor, cx| {
+                            editor.loading = false;
+                            cx.notify();
+                        });
+                        if discard {
+                            let _ = cx.update(|window, _| window.remove_window());
+                        }
+                    })
+                    .detach();
+                    cx.notify();
+                    false
+                })
+                .expect("editor exists while its window is open")
+        });
+
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let edit_focus = cx.focus_handle().tab_stop(true).tab_index(3);
@@ -163,6 +225,11 @@ impl Editor {
         #[cfg(target_os = "windows")]
         let gpu_failed = preview_error.is_some();
         Self {
+            menubar,
+            project_settings_visible: false,
+            project_path: None,
+            saved_document: Default::default(),
+            project_inputs: Vec::new(),
             settings_width: 300.0,
             timeline_height: 240.0,
             focus,
@@ -337,7 +404,11 @@ impl Editor {
             .flex()
             .w_full()
             .justify_between()
-            .child("プレビュー")
+            .child(if self.timeline.document == self.saved_document {
+                "プレビュー"
+            } else {
+                "プレビュー *"
+            })
             .when(self.loading, |header| header.child("読み込み中…"))
             .when(
                 {
@@ -352,19 +423,14 @@ impl Editor {
                 },
                 |header| header.child("映像を取得中…"),
             )
-            .child(
-                Button::new("app-settings")
-                    .label("アプリ設定")
-                    .secondary()
-                    .control_size(ControlSize::Sm)
-                    .on_click(|_, cx| crate::settings::open(cx)),
-            )
     }
 
     fn preview_content(&self, frame_width: f32, theme: &Theme) -> impl IntoElement {
         let frame = div()
             .w(px(frame_width))
-            .h(px(frame_width * 9.0 / 16.0))
+            .h(px(frame_width
+                * self.timeline.document.settings.height as f32
+                / self.timeline.document.settings.width as f32))
             .flex()
             .items_center()
             .justify_center()
@@ -424,7 +490,8 @@ impl Editor {
         );
         self.timeline_height = self.timeline_height.clamp(
             160.0,
-            (f32::from(viewport.height) - DIVIDER - 160.0).max(160.0),
+            (f32::from(viewport.height) - self.project_header_height() - DIVIDER - 160.0)
+                .max(160.0),
         );
     }
 
@@ -564,16 +631,24 @@ impl Render for Editor {
         let theme = Theme::get(cx).clone();
         let viewport = window.viewport_size();
         let preview_width = f32::from(viewport.width) - self.settings_width - DIVIDER;
-        let top_height = f32::from(viewport.height) - self.timeline_height - DIVIDER;
+        let top_height = f32::from(viewport.height)
+            - self.project_header_height()
+            - self.timeline_height
+            - DIVIDER;
         let error_height = if self.preview_error.is_some() {
             40.0
         } else {
             0.0
         };
         let frame_width = (preview_width - PADDING * 2.0)
-            .min((top_height - HEADER - error_height - PADDING * 2.0) * 16.0 / 9.0)
+            .min(
+                (top_height - HEADER - error_height - PADDING * 2.0)
+                    * self.timeline.document.settings.width as f32
+                    / self.timeline.document.settings.height as f32,
+            )
             .max(0.0);
 
+        self.update_menubar(window, cx);
         div()
             .id("editor")
             .track_focus(&self.focus)
@@ -593,6 +668,18 @@ impl Render for Editor {
                     cx.stop_propagation();
                 }
             })
+            .capture_key_down(
+                cx.listener(|editor, event: &gpui::KeyDownEvent, window, cx| {
+                    if event.keystroke.modifiers.control && !event.keystroke.modifiers.alt {
+                        match event.keystroke.key.as_str() {
+                            "s" => editor.save_project(event.keystroke.modifiers.shift, cx),
+                            "o" => editor.open_project(window, cx),
+                            _ => return,
+                        }
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .capture_any_mouse_down(cx.listener(|editor, event: &gpui::MouseDownEvent, _, cx| {
                 editor.finish_effect_edit(false, cx);
                 editor.pointer_down = event.button == MouseButton::Left;
@@ -660,6 +747,17 @@ impl Render for Editor {
                     editor.effect_drag = None;
                 }),
             )
+            .child(
+                div()
+                    .h(px(HEADER))
+                    .flex_none()
+                    .border_b_1()
+                    .border_color(theme.colors.hairline)
+                    .child(self.menubar.clone()),
+            )
+            .when(self.project_settings_visible, |element| {
+                element.child(self.project_controls(window, cx))
+            })
             .child(
                 div()
                     .flex()

@@ -209,6 +209,7 @@ impl VideoTextures {
 pub async fn decode_frames(
     objects: &[crate::timeline::Clip],
     frame: u64,
+    fps: u64,
     current: Arc<std::sync::atomic::AtomicU64>,
     generation: u64,
 ) -> Result<PreparedVideo> {
@@ -233,9 +234,7 @@ pub async fn decode_frames(
     let mut decoded = Vec::new();
     let mut bindings = HashMap::new();
     for (object, video, time) in videos {
-        let data = video
-            .read(time, crate::timeline::FPS, current.clone(), generation)
-            .await?;
+        let data = video.read(time, fps, current.clone(), generation).await?;
         let key = (video.id, data.number);
         bindings.insert(object, key);
         if !decoded.iter().any(|(existing, _)| *existing == key) {

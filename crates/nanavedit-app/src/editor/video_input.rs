@@ -11,7 +11,7 @@ use std::sync::{
 
 #[derive(Default)]
 pub(super) struct VideoState {
-    requested: Option<(Vec<Clip>, u64)>,
+    requested: Option<(Vec<Clip>, u64, crate::timeline::ProjectSettings)>,
     generation: Arc<AtomicU64>,
     presented: u64,
     pub busy: bool,
@@ -40,6 +40,7 @@ impl Editor {
             multiple: false,
             prompt: Some("動画ファイルを開く（入力プラグイン）".into()),
         });
+        let fps = self.timeline.document.settings.fps;
         self.loading = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -51,9 +52,7 @@ impl Editor {
                     .into_iter()
                     .next()
                     .context("ファイルが選択されていません")?;
-                let video = plugins
-                    .open(path.clone(), limit, crate::timeline::FPS)
-                    .await?;
+                let video = plugins.open(path.clone(), limit, fps).await?;
                 Ok(Some((path, video)))
             }
             .await;
@@ -70,9 +69,7 @@ impl Editor {
                                 .iter()
                                 .find(|clip| clip.id == clip_id)
                                 .expect("file target");
-                            let mut available = video
-                                .duration(crate::timeline::FPS)
-                                .min(u64::MAX - original.start);
+                            let mut available = video.duration(fps).min(u64::MAX - original.start);
                             for other in &editor.timeline.document.clips {
                                 if other.id != clip_id
                                     && other.layer == original.layer
@@ -129,7 +126,11 @@ impl Editor {
         if self.video_state.busy && self.timeline.playing.is_some() {
             return;
         }
-        let desired = (self.timeline.active_objects(), self.timeline.frame);
+        let desired = (
+            self.timeline.active_objects(),
+            self.timeline.frame,
+            self.timeline.document.settings,
+        );
         if self.video_state.requested.as_ref() != Some(&desired) {
             self.video_state.generation.fetch_add(1, Ordering::AcqRel);
             self.video_state.requested = Some(desired.clone());
@@ -138,12 +139,12 @@ impl Editor {
         if self.video_state.busy || self.video_state.presented == generation {
             return;
         }
-        let (objects, frame) = desired;
+        let (objects, frame, settings) = desired;
         if !nanavedit_engine::render::video::has_video(&objects) {
             self.preview
                 .as_ref()
                 .expect("live preview")
-                .set_objects(objects, frame);
+                .set_objects(objects, frame, settings);
             self.video_state.presented = generation;
             return;
         }
@@ -151,7 +152,11 @@ impl Editor {
         let current = self.video_state.generation.clone();
         cx.spawn(async move |this, cx| {
             let result = nanavedit_engine::render::video::decode_frames(
-                &objects, frame, current, generation,
+                &objects,
+                frame,
+                settings.fps,
+                current,
+                generation,
             )
             .await;
             let _ = this.update(cx, |editor, cx| {
@@ -166,7 +171,7 @@ impl Editor {
                     });
                     match result {
                         Ok(()) => {
-                            preview.set_objects(objects, frame);
+                            preview.set_objects(objects, frame, settings);
                             editor.preview_error = None;
                         }
                         Err(error) => {

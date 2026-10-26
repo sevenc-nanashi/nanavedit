@@ -1,7 +1,36 @@
 use crate::effects::EffectInstance;
 
-pub const FPS: u64 = 30;
-pub const INITIAL_LENGTH: u64 = FPS * 5;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectSettings {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u64,
+}
+
+impl Default for ProjectSettings {
+    fn default() -> Self {
+        Self {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+        }
+    }
+}
+
+impl ProjectSettings {
+    pub fn validate(self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (1..=8192).contains(&self.width) && (1..=8192).contains(&self.height),
+            "解像度は1〜8192pxで指定してください"
+        );
+        anyhow::ensure!(
+            (1..=240).contains(&self.fps),
+            "fpsは1〜240の整数で指定してください"
+        );
+        Ok(())
+    }
+}
 
 pub use nanavedit_media::ImageAsset;
 
@@ -97,8 +126,9 @@ impl Clip {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 pub struct Document {
+    pub settings: ProjectSettings,
     pub clips: Vec<Clip>,
 }
 

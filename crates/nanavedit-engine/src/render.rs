@@ -11,6 +11,7 @@ use std::{
 };
 
 pub struct Renderer {
+    pub settings: crate::timeline::ProjectSettings,
     videos: video::VideoTextures,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -94,6 +95,7 @@ impl Renderer {
             ..Default::default()
         });
         Ok(Self {
+            settings: Default::default(),
             videos: video::VideoTextures::new(&device),
             device: device.clone(),
             queue: queue.clone(),
@@ -173,6 +175,12 @@ impl Renderer {
         target: &wgpu::TextureView,
         size: (u32, u32),
     ) -> Result<()> {
+        self.settings.validate()?;
+        ensure!(
+            self.settings.width <= self.device.limits().max_texture_dimension_2d
+                && self.settings.height <= self.device.limits().max_texture_dimension_2d,
+            "シーンサイズがGPUの上限を超えています"
+        );
         let (width, height) = size;
         let limit = self.device.limits().max_texture_dimension_2d;
         ensure!(

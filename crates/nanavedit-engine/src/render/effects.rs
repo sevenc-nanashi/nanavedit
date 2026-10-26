@@ -7,8 +7,6 @@ use wgpu::util::DeviceExt;
 #[path = "transform.rs"]
 mod transform;
 
-const SCENE_SIZE: (u32, u32) = (1920, 1080);
-
 pub(super) struct GpuResources {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -351,7 +349,8 @@ impl GpuResources {
     }
 
     fn draw_object(&self, encoder: &mut wgpu::CommandEncoder, item: &RenderItem, scene: &Source) {
-        let projection = transform::Projection::new(None).expect("ordinary projection");
+        let projection = transform::Projection::new(None, (scene.width(), scene.height()))
+            .expect("ordinary projection");
         self.draw_quad(
             encoder,
             item,
@@ -370,7 +369,9 @@ impl GpuResources {
         scene: &Source,
         camera: CameraParams,
     ) {
-        if let Some(projection) = transform::Projection::new(Some(camera)) {
+        if let Some(projection) =
+            transform::Projection::new(Some(camera), (scene.width(), scene.height()))
+        {
             for polygon in transform::camera_polygons(&items, &projection) {
                 let item = &items[polygon.item];
                 let vertices = &polygon.vertices;
@@ -640,7 +641,7 @@ impl Renderer {
             scene_frame: evaluation.scene_frame,
             frame: evaluation.scene_frame - evaluation.object.start,
             total_frames: evaluation.object.length,
-            fps: crate::timeline::FPS,
+            fps: self.settings.fps,
             screen_size: evaluation.screen_size,
         };
         let result = (|| {
@@ -686,7 +687,7 @@ impl Renderer {
         let (width, height) = size;
         // shortcut: pool sizes follow this evaluation; add a global budget for large projects.
         self.resources.used_sizes.clear();
-        let (scene_width, scene_height) = SCENE_SIZE;
+        let (scene_width, scene_height) = (self.settings.width, self.settings.height);
         let mut scene = self.resources.acquire(scene_width, scene_height)?;
         {
             let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -710,7 +711,7 @@ impl Renderer {
             let context = EvaluationContext {
                 object,
                 scene_frame: frame,
-                screen_size: SCENE_SIZE,
+                screen_size: (self.settings.width, self.settings.height),
             };
             match &object.kind {
                 ObjectKind::Input { input, output } => {

@@ -1,4 +1,5 @@
 mod editor;
+mod project;
 use nanavedit_engine::effects;
 #[cfg(target_os = "windows")]
 mod input;

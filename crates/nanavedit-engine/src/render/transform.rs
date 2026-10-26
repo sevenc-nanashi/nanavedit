@@ -1,4 +1,4 @@
-use super::{CameraParams, RenderItem, RenderParams, SCENE_SIZE};
+use super::{CameraParams, RenderItem, RenderParams};
 
 const DEFAULT_DISTANCE: f32 = 1024.0;
 
@@ -16,6 +16,7 @@ fn local_point(point: [f32; 3], params: &RenderParams) -> [f32; 3] {
 }
 
 pub(super) struct Projection {
+    size: (u32, u32),
     camera: Option<CameraParams>,
     right: [f32; 3],
     down: [f32; 3],
@@ -24,8 +25,9 @@ pub(super) struct Projection {
 }
 
 impl Projection {
-    pub fn new(camera: Option<CameraParams>) -> Option<Self> {
+    pub fn new(camera: Option<CameraParams>, size: (u32, u32)) -> Option<Self> {
         let mut result = Self {
+            size,
             camera,
             right: [1.0, 0.0, 0.0],
             down: [0.0, 1.0, 0.0],
@@ -45,8 +47,7 @@ impl Projection {
             result.down = [-sy * sp, cp, -cy * sp];
             result.forward = [sy * cp, sp, cy * cp];
             if camera.fov != 0.0 {
-                result.distance =
-                    SCENE_SIZE.1 as f32 / (2.0 * (camera.fov.to_radians() / 2.0).tan());
+                result.distance = size.1 as f32 / (2.0 * (camera.fov.to_radians() / 2.0).tan());
             }
         }
         Some(result)
@@ -81,8 +82,8 @@ impl Projection {
                 y += params.position[1] * w;
             }
             [
-                2.0 * x / SCENE_SIZE.0 as f32,
-                -2.0 * y / SCENE_SIZE.1 as f32,
+                2.0 * x / self.size.0 as f32,
+                -2.0 * y / self.size.1 as f32,
                 w - self.distance * 0.05,
                 w,
             ]
@@ -91,8 +92,8 @@ impl Projection {
 
     pub fn clip(&self, point: [f32; 3]) -> [f32; 4] {
         [
-            2.0 * point[0] * self.distance / SCENE_SIZE.0 as f32,
-            -2.0 * point[1] * self.distance / SCENE_SIZE.1 as f32,
+            2.0 * point[0] * self.distance / self.size.0 as f32,
+            -2.0 * point[1] * self.distance / self.size.1 as f32,
             point[2] - self.distance * 0.05,
             point[2],
         ]

@@ -1,5 +1,5 @@
 use crate::effects::EffectInstance;
-pub use nanavedit_engine::timeline::{Clip, Document, FPS, INITIAL_LENGTH, ImageAsset, ObjectKind};
+pub use nanavedit_engine::timeline::{Clip, Document, ImageAsset, ObjectKind, ProjectSettings};
 use std::{collections::HashSet, time::Instant};
 const HISTORY_LIMIT: usize = 100;
 
@@ -18,7 +18,7 @@ pub struct Timeline {
 impl Default for Timeline {
     fn default() -> Self {
         Self {
-            document: Document { clips: Vec::new() },
+            document: Document::default(),
             selected: None,
             layer: 0,
             frame: 0,
@@ -32,6 +32,26 @@ impl Default for Timeline {
 }
 
 impl Timeline {
+    pub fn replace_document(&mut self, document: Document) {
+        self.next_id = self.next_id.max(
+            document
+                .clips
+                .iter()
+                .flat_map(|clip| {
+                    std::iter::once(clip.id).chain(clip.instances().map(|effect| effect.id))
+                })
+                .max()
+                .map_or(0, |id| id + 1),
+        );
+        self.document = document;
+        self.undo.clear();
+        self.redo.clear();
+        self.selected = None;
+        self.frame = 0;
+        self.layer = 0;
+        self.playing = None;
+    }
+
     pub fn selected_clip(&self) -> Option<&Clip> {
         self.document
             .clips
@@ -94,7 +114,7 @@ impl Timeline {
             .collect();
         clips.sort_by_key(|c| c.start);
         for clip in clips {
-            if start + INITIAL_LENGTH <= clip.start {
+            if start + (self.document.settings.fps * 5) <= clip.start {
                 break;
             }
             if start < clip.end() {
@@ -108,7 +128,7 @@ impl Timeline {
             effects: Vec::new(),
             layer,
             start,
-            length: INITIAL_LENGTH,
+            length: self.document.settings.fps * 5,
             source_start: 0,
         });
         self.selected = Some(id);
@@ -163,11 +183,9 @@ impl Timeline {
         }
         if let Some(video) = original.video() {
             start = start.max(original.start.saturating_sub(original.source_start));
-            end = end.min(
-                original
-                    .start
-                    .saturating_add(video.duration(FPS) - original.source_start),
-            );
+            end = end.min(original.start.saturating_add(
+                video.duration(self.document.settings.fps) - original.source_start,
+            ));
         }
         (start, end)
     }
@@ -239,7 +257,8 @@ impl Timeline {
 
     pub fn tick(&mut self) {
         if let Some((time, start)) = self.playing {
-            let frame = start + (time.elapsed().as_secs_f64() * FPS as f64).floor() as u64;
+            let frame = start
+                + (time.elapsed().as_secs_f64() * self.document.settings.fps as f64).floor() as u64;
             let last = self.end().saturating_sub(1);
             self.frame = frame.min(last);
             if frame >= last {

@@ -1,5 +1,5 @@
 use super::*;
-use crate::timeline::{Clip, Document, FPS, ObjectKind};
+use crate::timeline::{Clip, Document, ObjectKind};
 use gpui::{Bounds, Pixels, canvas, point};
 use gpui_kit::prelude::ScrollArea;
 use std::time::Instant;
@@ -69,8 +69,14 @@ impl Editor {
         }
         match command {
             Command::Play => self.timeline.toggle_playback(),
-            Command::Undo => self.timeline.undo(false),
-            Command::Redo => self.timeline.undo(true),
+            Command::Undo => {
+                self.timeline.undo(false);
+                self.project_inputs.clear();
+            }
+            Command::Redo => {
+                self.timeline.undo(true);
+                self.project_inputs.clear();
+            }
             Command::Delete => self.timeline.delete_selected(),
             Command::ZoomIn | Command::ZoomOut => {
                 let old = self.timeline.zoom;
@@ -442,11 +448,12 @@ impl Editor {
             );
         }
         toolbar.child(div().ml_2().whitespace_nowrap().child(format!(
-            "{:02}:{:02}:{:02}  /  {}f · 30fps",
-            self.timeline.frame / FPS / 60,
-            self.timeline.frame / FPS % 60,
-            self.timeline.frame % FPS,
+            "{:02}:{:02}:{:02}  /  {}f · {}fps",
+            self.timeline.frame / self.timeline.document.settings.fps / 60,
+            self.timeline.frame / self.timeline.document.settings.fps % 60,
+            self.timeline.frame % self.timeline.document.settings.fps,
             self.timeline.frame,
+            self.timeline.document.settings.fps,
         )))
     }
 
@@ -467,8 +474,8 @@ impl Editor {
         let frames = self
             .timeline
             .end()
-            .max(self.timeline.frame + FPS * 5)
-            .max(FPS * 30);
+            .max(self.timeline.frame + self.timeline.document.settings.fps * 5)
+            .max(self.timeline.document.settings.fps * 30);
         let width = LABEL + frames as f32 * zoom;
         let height = RULER + self.timeline_layers as f32 * ROW;
         let bounds = self.timeline_bounds.clone();
@@ -493,14 +500,21 @@ impl Editor {
             );
         let offset = -f32::from(self.timeline_scroll.offset().x);
         let viewport = f32::from(self.timeline_scroll.bounds().size.width).max(1280.0);
-        let first_second = ((offset - LABEL).max(0.0) / zoom / FPS as f32).floor() as u64;
+        let first_second =
+            ((offset - LABEL).max(0.0) / zoom / self.timeline.document.settings.fps as f32).floor()
+                as u64;
         let last_second =
-            (((offset + viewport) / zoom / FPS as f32).ceil() as u64).min(frames / FPS);
+            (((offset + viewport) / zoom / self.timeline.document.settings.fps as f32).ceil()
+                as u64)
+                .min(frames / self.timeline.document.settings.fps);
         for second in first_second..=last_second {
             content = content.child(
                 div()
                     .absolute()
-                    .left(px(LABEL + second as f32 * FPS as f32 * zoom))
+                    .left(px(LABEL
+                        + second as f32
+                            * self.timeline.document.settings.fps as f32
+                            * zoom))
                     .top_0()
                     .h(px(height))
                     .w(px(1.0))

@@ -143,12 +143,18 @@ impl Preview {
         Ok(())
     }
 
-    pub fn set_objects(&self, objects: Vec<Clip>, frame: u64) {
+    pub fn set_objects(
+        &self,
+        objects: Vec<Clip>,
+        frame: u64,
+        settings: crate::timeline::ProjectSettings,
+    ) {
         let mut gpu = self.native.gpu.borrow_mut();
         if let Some(gpu) = gpu.as_mut() {
             let time_changed = gpu.frame != frame && depends_on_time(&objects);
             gpu.frame = frame;
-            if gpu.visible != objects || time_changed {
+            if gpu.visible != objects || time_changed || gpu.renderer.settings != settings {
+                gpu.renderer.settings = settings;
                 gpu.visible = objects;
                 self.native.invalidate();
             }

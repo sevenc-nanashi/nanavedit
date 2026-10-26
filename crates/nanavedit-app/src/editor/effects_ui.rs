@@ -1,6 +1,6 @@
 use super::*;
 use crate::effects::{ParamDefinition, ParamValue};
-use crate::timeline::{FPS, ObjectKind};
+use crate::timeline::ObjectKind;
 use gpui::Focusable;
 use gpui_kit::prelude::{
     Checkbox, NumberInput, NumberInputEvent, Select, SelectEvent, SelectOption, Slider,
@@ -498,7 +498,7 @@ impl Editor {
             .child(format!(
                 "長さ: {} フレーム（{:.2}秒）",
                 clip.length,
-                clip.length as f64 / FPS as f64
+                clip.length as f64 / self.timeline.document.settings.fps as f64
             ));
         if matches!(clip.kind, ObjectKind::Effect) {
             let target = self
